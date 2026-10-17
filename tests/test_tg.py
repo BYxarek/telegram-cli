@@ -212,6 +212,73 @@ class SkillsTests(unittest.TestCase):
             self.assertEqual((root / folder / "skills" / "telegram-cli" / "SKILL.md").read_bytes(), self.content)
 
 
+class UpdateTests(unittest.TestCase):
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.root = Path(self.stack.enter_context(TemporaryDirectory()))
+        self.stack.enter_context(patch.dict(os.environ, {"LOCALAPPDATA": str(self.root)}, clear=True))
+        self.stack.enter_context(patch("tg.sys.stdout.isatty", return_value=True))
+        self.stack.enter_context(patch("tg.time.time", return_value=100000))
+        self.fetch = self.stack.enter_context(patch("tg.urlopen"))
+        self.fetch.return_value.__enter__.return_value.read.return_value = b'{"info":{"version":"0.10.0"}}'
+        self.output = io.StringIO()
+        self.stack.enter_context(redirect_stderr(self.output))
+        self.cache = self.root / "telegram-cli" / "cache" / "update-check.json"
+
+    def test_new_version_notice_is_cached_and_uses_numeric_comparison(self):
+        tg.check_update()
+        tg.check_update()
+        self.fetch.assert_called_once()
+        self.assertEqual(self.fetch.call_args.kwargs["timeout"], 1)
+        self.assertIn("0.10.0", self.output.getvalue())
+        self.assertIn("tcli skills install", self.output.getvalue())
+        self.assertEqual(json.loads(self.cache.read_text())["latest"], "0.10.0")
+
+    def test_noninteractive_and_opt_out_do_not_use_network_or_create_files(self):
+        with patch("tg.sys.stdout.isatty", return_value=False):
+            tg.check_update()
+        with patch.dict(os.environ, {"TCLI_NO_UPDATE_CHECK": "1"}):
+            tg.check_update()
+        self.fetch.assert_not_called()
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_offline_failure_is_silent_and_cached(self):
+        self.fetch.side_effect = OSError("offline")
+        tg.check_update()
+        tg.check_update()
+        self.fetch.assert_called_once()
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_stale_cache_is_refreshed_and_invalid_versions_are_not_displayed(self):
+        self.cache.parent.mkdir(parents=True)
+        self.cache.write_text('{"checked_at":0,"latest":"0.0.1"}')
+        self.fetch.return_value.__enter__.return_value.read.return_value = b'{"info":{"version":"bad\\u001b[2J"}}'
+        tg.check_update()
+        self.fetch.assert_called_once()
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_current_version_bad_response_and_unwritable_cache_are_harmless(self):
+        for response in (b"not json", b"[]", json.dumps({"info": {"version": tg.__version__}}).encode()):
+            with self.subTest(response=response), patch("tg.atomic_write", side_effect=OSError("read only")):
+                self.fetch.return_value.__enter__.return_value.read.return_value = response
+                tg.check_update()
+                self.assertEqual(self.output.getvalue(), "")
+
+    def test_general_help_checks_but_command_help_and_version_do_not(self):
+        with patch("tg.check_update") as check, patch("tg.sys.stdout.reconfigure"), \
+                patch("tg.sys.stderr.reconfigure", create=True), patch("builtins.print"):
+            for args in ([], ["help"], ["--help"], ["-h"]):
+                with patch("sys.argv", ["tcli", *args]):
+                    self.assertEqual(tg.main(), 0)
+            self.assertEqual(check.call_count, 4)
+            check.reset_mock()
+            for args in (["read", "--help"], ["help", "read"], ["--version"]):
+                with patch("sys.argv", ["tcli", *args]), self.assertRaises(SystemExit):
+                    tg.main()
+            check.assert_not_called()
+
+
 class ConfigTests(unittest.TestCase):
     def setUp(self):
         directory = TemporaryDirectory()

@@ -1,6 +1,6 @@
 # Publishing telegram-cli-local
 
-The package is prepared for its first PyPI release, version 0.1.0. No PyPI upload is performed
+The initial PyPI release is version 0.1.0. No PyPI upload is performed
 on a normal push or a manual workflow run. Only publishing a GitHub Release triggers the publish job.
 
 ## One-time PyPI setup
@@ -44,8 +44,7 @@ It needs access to PyPI to install the wheel's dependencies; it never accesses T
 ## Publish a release
 
 1. Update `__version__` in `tcli_skills/__init__.py` for each new release. PyPI versions are immutable.
-2. Keep all three skill copies identical and update both READMEs. For the first successful PyPI
-   publication, remove the temporary "prepared for PyPI" wording in the documentation.
+2. Keep all three skill copies identical and update both READMEs.
 3. Commit and push to `main`. Wait for the `Test, build, and publish` workflow to pass on Windows
    and Linux with Python 3.10 and 3.14, including the built-wheel installation check.
 4. Create a GitHub Release targeting that commit with a matching tag, initially `v0.1.0`, and publish it.

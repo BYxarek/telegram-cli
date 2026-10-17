@@ -13,7 +13,10 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
+from http.client import HTTPException
+from urllib.request import Request, urlopen
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, RPCError
@@ -141,6 +144,45 @@ def atomic_write(path, content):
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def check_update():
+    if not sys.stdout.isatty() or os.environ.get("TCLI_NO_UPDATE_CHECK") == "1":
+        return
+    directory = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "share") / "telegram-cli" / "cache"
+    path = directory / "update-check.json"
+    now = time.time()
+    try:
+        cache = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cache = {}
+    if not isinstance(cache, dict):
+        cache = {}
+    checked = cache.get("checked_at")
+    if not isinstance(checked, (int, float)) or not 0 <= now - checked < 86400:
+        latest = None
+        try:
+            request = Request("https://pypi.org/pypi/telegram-cli-local/json",
+                              headers={"User-Agent": f"tcli/{__version__}"})
+            with urlopen(request, timeout=1) as response:
+                data = json.loads(response.read(262144))
+            if isinstance(data, dict) and isinstance(data.get("info"), dict):
+                latest = data["info"].get("version")
+        except (OSError, ValueError, HTTPException):
+            pass
+        cache = {"checked_at": now, "latest": latest}
+        try:
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            atomic_write(path, json.dumps(cache).encode("utf-8"))
+        except OSError:
+            pass
+    latest = cache.get("latest")
+    # shortcut: stable x.y.z releases only; use PEP 440 parsing if prereleases are introduced.
+    if isinstance(latest, str) and re.fullmatch(r"[0-9]{1,8}\.[0-9]{1,8}\.[0-9]{1,8}", latest):
+        if tuple(map(int, latest.split("."))) > tuple(map(int, __version__.split("."))):
+            print(f"Update available: {__version__} -> {latest}. Run: pipx upgrade telegram-cli-local "
+                  "(or python -m pip install --upgrade telegram-cli-local in your environment). "
+                  "Then run: tcli skills install", file=sys.stderr)
 
 
 def agent_installed(name):
@@ -321,11 +363,12 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
     cli = parser()
-    args = cli.parse_args()
+    args = cli.parse_args([] if sys.argv[1:] in (["--help"], ["-h"]) else None)
     if args.command is None or args.command == "help":
         if args.command == "help" and args.topic:
             cli.parse_args([args.topic, "--help"])
         cli.print_help()
+        check_update()
         return 0
     try:
         if args.command == "skills":

@@ -38,9 +38,9 @@ The CLI, developer documentation, and agent instructions are English; preserve U
 
 ## Setup
 
-After the first PyPI release, install the published CLI with `pipx install telegram-cli-local`.
+Install the published CLI with `pipx install telegram-cli-local`.
 Update it with `pipx upgrade telegram-cli-local`, then run `tcli skills install` to update user skills.
-Until publication, install from a clone as described below; PyPI availability is not implied by this skill.
+Source installation from a clone is also supported as described below.
 `tcli --version` reports the CLI version.
 
 Install from this local project with `py -m pip install --user -e .` on Windows.
@@ -80,7 +80,12 @@ If an agent process has an old PATH, refresh its environment or use the installe
 
 `tcli`, `tcli help`, `tcli --help`, and `tcli -h` display general help and exit successfully.
 `tcli help send` is equivalent to `tcli send --help`; this applies to every subcommand.
-Help does not load credentials, create data directories, or connect to Telegram.
+Help does not load credentials, create Telegram sessions, or connect to Telegram.
+Interactive general help (no arguments, help, --help, -h) checks PyPI for a newer stable x.y.z release.
+It uses a one-second network timeout and a 24-hour cache at data-directory/cache/update-check.json,
+including failed attempts. It only reports updates on stderr, never installs them automatically.
+Network/cache errors are silent. Redirected stdout, command-specific help, and --version skip checks.
+Set TCLI_NO_UPDATE_CHECK=1 to disable checks and their cache writes entirely.
 Unknown commands, unknown help topics, and invalid arguments remain usage errors (exit 2).
 
 | Command | Behavior |

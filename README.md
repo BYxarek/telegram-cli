@@ -51,11 +51,10 @@ Message editing, deletion, and a full-screen interface are not available.
 ## Installation
 
 Requires **Python 3.10+**, pip, and access to Telegram.
-The package is prepared for PyPI; until the first release is published, use the GitHub installation below.
 
 ### Published package and updates
 
-After the first PyPI release, install the isolated CLI and its user skills:
+Install the isolated CLI and its user skills:
 
 ```console
 pipx install telegram-cli-local
@@ -171,6 +170,12 @@ tcli read --help       # Read options and examples
 ```
 
 Help does not load configuration, create a session, or connect to Telegram.
+In an interactive terminal, `tcli`, `tcli help`, `tcli --help`, and `tcli -h` also check PyPI for
+a newer stable release. The check uses a one-second network timeout and caches results (including
+failed checks) for 24 hours in the data directory's `cache/update-check.json`.
+Available updates are reported on stderr with upgrade instructions; no update is installed automatically.
+Network/cache errors are silent. Piped output, command-specific help, and `--version` skip the check.
+Set `TCLI_NO_UPDATE_CHECK=1` to disable it entirely.
 Running `tcli` without a command succeeds instead of showing a missing-command error.
 Unknown commands and invalid arguments still return an error.
 
