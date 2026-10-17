@@ -1,13 +1,14 @@
 # Telegram CLI
 
-Локальный Python CLI для личного Telegram-аккаунта на Telethon, входная точка — `tg.py`.
-Для работы с CLI и его кодом используй навык `.agents/skills/telegram-cli/SKILL.md`.
-Общий справочник команд и устройства проекта: `docs/agent-guide.md`.
+Local Python CLI for a personal Telegram account, using Telethon. Entry point: `tg.py`.
+Use `.agents/skills/telegram-cli/SKILL.md` for CLI operation and implementation tasks.
+Shared command and architecture reference: `docs/agent-guide.md`.
 
-Проверка без аккаунта: `.\.venv\Scripts\python.exe -m unittest discover -s tests -v`.
-Разработка и тесты не требуют живого входа или отправки сообщений.
-Не сохраняй API hash, коды входа, пароль или сессию в исходниках и документации.
+Offline validation: `.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v`.
+Development and tests do not require a live account or sending real messages.
+Never store API secrets, login codes, passwords, or session files in source or documentation.
+Use English for CLI output and developer instructions. Maintain `README.md` in English and `README.ru.md` in Russian.
 
-Если доступен Semble, ищи реализацию через `search`, затем читай найденный участок напрямую.
-Для документации используй `content="docs"`, для настроек — `content="config"`.
-Буквальный поиск по всему проекту используй, когда нужны все вхождения, например все вызывающие функции.
+Use Semble search to locate implementations when available, then read the matching code directly.
+Use `content="docs"` for documentation and `content="config"` for configuration.
+Use literal repository-wide search when all occurrences are required, such as callers of a changed function.

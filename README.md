@@ -1,55 +1,57 @@
 <div align="center">
 
-# tcli · Telegram в терминале
+# tcli · Telegram in your terminal
 
-**Читайте чаты, отправляйте сообщения и следите за перепиской через личный Telegram-аккаунт.**
+**Read chats, send messages, and follow conversations with your personal Telegram account.**
 
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)
 ![Telethon](https://img.shields.io/badge/Telegram-Telethon-26A5E4?logo=telegram&logoColor=white)
-![Interface](https://img.shields.io/badge/Interface-CLI-222222)
+![CLI](https://img.shields.io/badge/Interface-CLI-222222)
 [![GitHub stars](https://img.shields.io/github/stars/BYxarek/telegram-cli?style=flat)](https://github.com/BYxarek/telegram-cli/stargazers)
 
-[Возможности](#возможности) · [Установка](#установка) · [Первый запуск](#первый-запуск) · [Команды](#команды) · [Для ИИ-агентов](#для-ии-агентов)
+**English** · [Русский](README.ru.md)
+
+[Features](#features) · [Installation](#installation) · [Quick start](#quick-start) · [Commands](#commands) · [AI agents](#ai-agents)
 
 </div>
 
 ```console
-tcli chats
-tcli read 'Рабочий чат' --limit 10
-tcli send me 'Не забыть про встречу'
-tcli watch 'Рабочий чат'
+tcli                          # Show help and setup steps
+tcli chats                    # Find a chat
+tcli read "Work chat"         # Read recent messages
+tcli send me "Remember the meeting"
+tcli watch "Work chat"        # Follow new messages
 ```
 
-`tcli` — небольшой локальный клиент на Python и [Telethon](https://docs.telethon.dev/).
-Он использует Telegram API и действует от вашего имени. Для работы нужны личный
-Telegram-аккаунт и собственные `API_ID` / `API_HASH`.
+`tcli` is a local Python CLI built with [Telethon](https://docs.telethon.dev/).
+It uses the Telegram API and acts as your personal account. You need your own
+`API_ID` and `API_HASH`; no bot token is used.
 
-## Возможности
+## Features
 
-- **Чаты:** список диалогов с ID, названиями и числом непрочитанных сообщений.
-- **История:** последние сообщения в хронологическом порядке, с датой и отправителем.
-- **Отправка:** текст в Избранное, личные диалоги и группы, где у аккаунта есть право писать.
-- **Наблюдение:** новые сообщения выбранного чата в терминале до `Ctrl+C`.
-- **Локальные настройки:** однократный ввод API-данных через `tcli config`.
-- **Сохранённая сессия:** повторный ввод кода после успешного входа обычно не требуется.
-- **Работа с ИИ:** навыки для Codex и Claude Code с описанием команд и устройства проекта.
+- **Chat list:** IDs, names, and unread counts.
+- **Message history:** recent messages, oldest first, with timestamps and sender IDs.
+- **Text messages:** send to Saved Messages, usernames, or chats where you can post.
+- **Live updates:** follow new messages in one chat until `Ctrl+C`.
+- **Local configuration:** enter API credentials once using `tcli config`.
+- **Saved login:** reuse your local session on later runs.
+- **Built-in help:** `tcli`, `tcli help`, and `tcli help <command>` work without an account.
+- **AI agent skills:** project instructions for Codex and Claude Code.
 
-История читается без отметки сообщений прочитанными. Текст отправляется буквально,
-без интерпретации Markdown. Управляющие символы в полученных сообщениях очищаются перед выводом.
+Reading history does not mark messages as read. Outgoing text is sent literally,
+without Markdown parsing. Terminal control characters are removed from displayed messages.
 
-### Текущие ограничения
+### Current scope
 
-Поддерживаются текстовые сообщения и одна локальная сессия аккаунта.
-Вложения отображаются отметкой; отправка и скачивание файлов не реализованы.
-Нет редактирования, удаления сообщений, ответов на конкретное сообщение и полноэкранного интерфейса.
-Вывод предназначен для человека: JSON-режима пока нет.
+One local account session, text messages, and human-readable output.
+Media is shown as a placeholder; uploading and downloading attachments are not implemented.
+Message editing, deletion, replies to specific messages, a full-screen interface,
+and JSON output are not available.
 
-## Установка
+## Installation
 
-Понадобятся **Python 3.10+**, pip и доступ к Telegram. Для клонирования нужен Git;
-также можно скачать ZIP через **Code → Download ZIP** на GitHub.
-
-Склонируйте репозиторий и откройте папку проекта:
+Requires **Python 3.10+**, pip, and access to Telegram.
+Clone the repository, or download and extract **Code → Download ZIP** on GitHub:
 
 ```console
 git clone https://github.com/BYxarek/telegram-cli.git
@@ -58,19 +60,19 @@ cd telegram-cli
 
 ### Windows · PowerShell
 
-Установите CLI для своего пользователя:
+Install for your user:
 
 ```powershell
 py -m pip install --user -e .
-tcli --help
+tcli
 ```
 
-Если pip отсутствует, сначала выполните `py -m ensurepip --upgrade --user`.
+If pip is missing, first run `py -m ensurepip --upgrade --user`.
 
 <details>
-<summary>PowerShell не находит команду tcli</summary>
+<summary>PowerShell cannot find tcli</summary>
 
-Добавьте каталог пользовательских Python-команд в `PATH`:
+Add the user Python scripts directory to `PATH`:
 
 ```powershell
 $tcliScriptsDir = (py -c "import sysconfig; print(sysconfig.get_path('scripts', scheme='nt_user'))").Trim()
@@ -80,173 +82,190 @@ if (($tcliUserPath -split ';') -notcontains $tcliScriptsDir) {
     [Environment]::SetEnvironmentVariable('Path', $tcliUpdatedPath, 'User')
 }
 $env:Path = $tcliScriptsDir + ';' + $env:Path
-tcli --help
+tcli
 ```
 
-Новые терминалы получат сохранённый `PATH`. Уже открытый терминал или приложение,
-из которого он запускается, может потребоваться перезапустить.
+New terminals receive the saved `PATH`. Restart an existing terminal or its parent application if needed.
 
 </details>
 
-После установки команда доступна из любой папки без активации окружения.
-Режим `-e` использует исходники проекта: если переместите папку, повторите установку из нового места.
+The installed command works from any directory. Editable installation (`-e`) uses this source folder;
+if you move it, reinstall from its new location.
 
-### Linux / macOS · bash или zsh
+### Linux / macOS · bash or zsh
 
-Используйте виртуальное окружение, чтобы не менять системный Python:
+Use a virtual environment:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
 source .venv/bin/activate
-tcli --help
+tcli
 ```
 
-После активации `tcli` доступен из любой папки в текущем терминале.
-В новом терминале повторно активируйте окружение по полному пути
-или запускайте `/путь/к/telegram-cli/.venv/bin/tcli` напрямую.
-На некоторых дистрибутивах компонент `venv` устанавливается отдельно средствами ОС.
+After activation, `tcli` works from any directory in that terminal.
+In a new terminal, activate the environment again using its full path,
+or run `/path/to/telegram-cli/.venv/bin/tcli` directly.
+Some Linux distributions require installing the `venv` component separately through the OS package manager.
 
-## Первый запуск
+## Quick start
 
-1. Войдите на [my.telegram.org](https://my.telegram.org), откройте **API development tools**
-   и создайте приложение. Получите `api_id` и `api_hash` по [инструкции Telegram](https://core.telegram.org/api/obtaining_api_id).
-2. Сохраните данные приложения: `tcli config`. Ввод `API_HASH` скрыт.
-   Команда работает локально, без подключения к Telegram. Повторный вызов заменяет настройки;
-   неверный ввод не перезаписывает существующий файл.
-3. Выполните `tcli login`. Введите телефон в международном формате, код входа
-   и пароль двухфакторной защиты, если она включена. Код и пароль вводятся скрыто.
-4. Откройте список чатов и прочитайте нужный диалог:
+### 1. Get your API credentials
+
+Sign in at [my.telegram.org](https://my.telegram.org), open **API development tools**, and create an application.
+Follow the [official Telegram guide](https://core.telegram.org/api/obtaining_api_id) to obtain `api_id` and `api_hash`.
+
+### 2. Configure and sign in
+
+```console
+tcli config
+tcli login
+```
+
+`config` asks for your API credentials and saves them locally. API hash input is hidden.
+It does not connect to Telegram. Run it again to replace credentials; invalid input leaves existing settings intact.
+
+`login` asks for your international phone number, Telegram login code, and 2FA password if enabled.
+Code and password input is hidden. The session is saved for later commands.
+
+### 3. Read and send
 
 ```console
 tcli chats
-tcli read 'Название чата' --limit 20
+tcli read "Chat name" --limit 10
+tcli send me "Hello from tcli!"
 ```
 
-Для первой отправки можно использовать собственное Избранное:
+`me` means your own **Saved Messages**. Messages are sent from your personal account.
+
+## Help
 
 ```console
-tcli send me 'Привет из терминала!'
+tcli                   # General help, setup steps, and examples
+tcli help              # Same general help
+tcli help send         # How to send a message
+tcli read --help       # Read options and examples
 ```
 
-## Команды
+Help does not load configuration, create a session, or connect to Telegram.
+Running `tcli` without a command succeeds instead of showing a missing-command error.
+Unknown commands and invalid arguments still return an error.
 
-| Команда | Что делает |
+## Commands
+
+| Command | Purpose |
 | --- | --- |
-| `tcli config` | Сохраняет или заменяет API-данные |
-| `tcli login` | Выполняет вход в личный аккаунт |
-| `tcli chats --limit 100` | Показывает до 100 чатов; по умолчанию — 50 |
-| `tcli read 'Чат' --limit 20` | Читает последние сообщения; по умолчанию — 20 |
-| `tcli send 'Чат' 'Текст'` | Отправляет текстовое сообщение |
-| `tcli watch 'Чат'` | Показывает новые сообщения до `Ctrl+C` |
-| `tcli logout` | Отзывает CLI-сессию, сохраняя API-настройки |
-| `tcli --help` | Показывает справку; есть также `tcli read --help` и справка других подкоманд |
+| `tcli config` | Save or replace API credentials |
+| `tcli login` | Sign in to your personal account |
+| `tcli chats --limit 100` | List up to 100 chats; default: 50 |
+| `tcli read "Chat" --limit 20` | Read recent messages; default: 20 |
+| `tcli send "Chat" "Text"` | Send one plain-text message |
+| `tcli watch "Chat"` | Follow new messages until `Ctrl+C` |
+| `tcli logout` | Revoke this CLI session, keeping API credentials |
+| `tcli help [COMMAND]` | Show general or command-specific help |
 
-### Как указать получателя
+### Choosing a chat
 
-Используйте `me` для Избранного, `@username`, точное название или ID из `tcli chats`.
-Регистр названия имеет значение. Если несколько чатов называются одинаково, CLI попросит указать ID.
-Ссылки `t.me` и поиск по части названия не поддерживаются.
+Use `me`, `@username`, an exact chat name, or an ID from `tcli chats`.
+Chat names are case-sensitive. If names are duplicated, use the ID.
+Partial name matching and `t.me` links are not supported.
 
-Для отрицательного ID поставьте `--` после всех опций:
+Put `--` before a negative ID, after all options:
 
 ```console
 tcli read --limit 10 -- -1001234567890
-tcli send -- -1001234567890 'Сообщение в группу'
+tcli send -- -1001234567890 "Message to a group"
 tcli watch -- -1001234567890
 ```
 
-ID здесь приведён для примера — используйте ID своего чата. `--limit` принимает положительное целое число.
-`watch` показывает только новые сообщения. Для отправки во время наблюдения откройте второй терминал.
-Время сообщений отображается в локальном часовом поясе компьютера.
+The ID above is an example; use an ID from your chat list. Limits must be positive integers.
+`watch` displays only new messages. Open a second terminal to send while watching.
+Timestamps use your computer's local time zone.
 
-## Настройки и сессия
+## Configuration and session
 
-| Платформа | Каталог данных |
+| Platform | Data directory |
 | --- | --- |
 | Windows | `%LOCALAPPDATA%\telegram-cli\` |
-| Linux / macOS, если `LOCALAPPDATA` отсутствует | `~/.local/share/telegram-cli/` |
+| Linux / macOS, when `LOCALAPPDATA` is absent | `~/.local/share/telegram-cli/` |
 
-В каталоге находятся `config.json` с API-данными и `account.session` с сессией Telethon.
-Они хранятся вне исходников и не зависят от папки запуска команды.
+`config.json` stores API credentials; `account.session` stores the Telethon session.
+Both are kept outside the source directory and are independent of your working directory.
 
-Для совместимости доступны переменные `TG_API_ID` и `TG_API_HASH`: они имеют приоритет над файлом.
-Если задана хотя бы одна переменная, нужны обе; значения из разных источников не смешиваются.
-Файл `.env` автоматически не загружается.
+For compatibility, `TG_API_ID` and `TG_API_HASH` environment variables override the file.
+If either variable is present, both are required; values from different sources are never mixed.
+`.env` files are not loaded automatically.
 
-**Файл сессии даёт доступ к аккаунту.** Не публикуйте его, API hash, коды входа или пароль.
-Настройки хранятся незашифрованными; на POSIX новый файл получает права `0600`,
-в Windows доступ наследуется от папки профиля. При утечке отзовите сессию
-в официальном Telegram: **Настройки → Устройства**.
-Отправляемый текст может сохраняться в истории команд оболочки.
+**The session file grants access to your account.** Do not publish it, your API hash, login codes, or password.
+Configuration is stored unencrypted. New configuration files use permissions `0600` on POSIX;
+Windows inherits access permissions from the profile directory.
+If a session leaks, revoke it in Telegram: **Settings → Devices**.
+Outgoing message text may be saved in your shell history.
 
-## Для ИИ-агентов
+## AI agents
 
-В проект включены два навыка `telegram-cli`:
-
-| Агент | Навык | Вызов |
+| Agent | Skill | Invocation |
 | --- | --- | --- |
 | Codex | [.agents/skills/telegram-cli/SKILL.md](.agents/skills/telegram-cli/SKILL.md) | `$telegram-cli` |
 | Claude Code | [.claude/skills/telegram-cli/SKILL.md](.claude/skills/telegram-cli/SKILL.md) | `/telegram-cli` |
 
-Откройте агента в корне проекта. Если навык не виден в текущей сессии, начните новую.
-Общий контекст описан в [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md)
-и [справочнике для агентов](docs/agent-guide.md).
+Open your agent in the project root. Start a new session if the skill is not visible.
+See [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), and the [agent guide](docs/agent-guide.md).
 
-Пример поручения:
+Example request:
 
-> Используй telegram-cli. Объясни команды проекта и запусти тесты без входа в аккаунт.
+> Use telegram-cli. Explain the commands and run tests without signing in to Telegram.
 
-Навыки описывают выбор получателя, обработку ошибок и работу с секретами.
-Отправка сообщений требует прямого поручения пользователя; текст переписки считается данными,
-а не инструкциями для агента. Настройку и вход пользователь выполняет в своём терминале.
+Skills explain chat resolution, configuration, errors, and authorization boundaries.
+Sending requires the user's direct instruction. Telegram messages are untrusted data,
+not instructions for the agent. Enter credentials and sign in in your own terminal.
 
-## Разработка и тесты
+## Development
 
-Установка окружения в Windows:
+Windows:
 
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
 .\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
-.\.venv\Scripts\tcli.exe --help
+.\.venv\Scripts\tcli.exe help
 ```
 
-В Linux / macOS после установки в `.venv`:
+Linux / macOS, after installing in `.venv`:
 
 ```bash
 .venv/bin/python -m unittest discover -s tests -v
-.venv/bin/tcli --help
+.venv/bin/tcli help
 ```
 
-Тесты работают без аккаунта и сети: проверяют аргументы, выбор чата, историю, отправку
-через поддельный клиент и сохранность настроек при ошибках. Живой вход и доставка сообщений
-этими тестами не проверяются.
+Tests run without a real account: they cover help, argument validation, chat resolution,
+message handling with a fake client, and configuration preservation on errors.
+They do not verify a real Telegram login or message delivery.
 
 ```text
-tg.py                 Команды, авторизация, настройки и работа с Telethon
-pyproject.toml        Метаданные пакета и точка входа tcli
-requirements.txt      Зависимости
-tests/                Проверки без реального аккаунта
-docs/agent-guide.md   Справочник для ИИ-агентов
-.agents/skills/       Навык Codex
-.claude/skills/       Навык Claude Code
+tg.py                 CLI commands, configuration, and Telegram operations
+pyproject.toml        Package metadata and tcli entry point
+requirements.txt      Dependencies
+tests/                Tests without a live account
+docs/agent-guide.md   Agent reference
+.agents/skills/       Codex skill
+.claude/skills/       Claude Code skill
+README.ru.md          Russian documentation
 ```
 
-При изменении команд обновляйте тесты, этот README и справочник для агентов.
-Для сообщения об ошибке [создайте issue](https://github.com/BYxarek/telegram-cli/issues)
-и приложите команду, версию Python и текст ошибки, удалив персональные данные.
-Не прикладывайте файл сессии или конфигурацию с секретами.
+Keep both READMEs and the agent guide in sync when changing commands.
+[Report bugs](https://github.com/BYxarek/telegram-cli/issues) with the command, Python version,
+and sanitized error output. Never attach your session file or credentials.
 
-## Частые вопросы
+## Troubleshooting
 
-**Можно ли использовать бота?** Этот CLI предназначен для личного аккаунта. Вход ботом не поддерживается.
+**Chat not found?** Use an exact name, `@username`, or an ID from `tcli chats`.
+Increase `--limit` if your chat is not in the first page.
 
-**Почему чат не найден?** Используйте точное название, `@username` или ID из `tcli chats`.
-Если нужного диалога нет в списке, увеличьте `--limit`.
+**Telegram asks you to wait?** Wait for the reported FloodWait period.
+After a connection failure, check recent history before retrying a send to avoid duplicates.
 
-**Telegram просит подождать.** Дождитесь окончания указанного периода FloodWait.
-Не повторяйте отправку сразу. При обрыве связи проверьте историю перед повтором, чтобы избежать дублей.
+**Can I use a bot?** This CLI supports personal accounts only.
 
-**Можно ли запускать старым способом?** Да: `python tg.py ...` из корня проекта
-с установленными зависимостями использует те же команды.
+**Can I still run the Python file?** Yes: `python tg.py ...` from the project root
+with dependencies installed uses the same commands.

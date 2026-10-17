@@ -1,12 +1,59 @@
 import unittest
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import tg
+
+
+class HelpTests(unittest.TestCase):
+    def command(self, *args):
+        with TemporaryDirectory() as directory:
+            environment = os.environ.copy()
+            environment.pop("TG_API_ID", None)
+            environment.pop("TG_API_HASH", None)
+            environment["LOCALAPPDATA"] = directory
+            result = subprocess.run(
+                [sys.executable, str(Path(tg.__file__).resolve()), *args],
+                cwd=directory, env=environment, capture_output=True, text=True,
+                encoding="utf-8", timeout=10)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+        return result
+
+    def test_no_arguments_and_general_help_succeed_without_configuration(self):
+        outputs = []
+        for args in ((), ("help",), ("--help",), ("-h",)):
+            with self.subTest(args=args):
+                result = self.command(*args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("tcli config", result.stdout)
+                self.assertIn("tcli login", result.stdout)
+                self.assertIn("tcli help send", result.stdout)
+                self.assertIn("-- -1001234567890", result.stdout)
+                outputs.append(result.stdout)
+        self.assertTrue(all(output == outputs[0] for output in outputs))
+
+    def test_command_help_matches_help_flag(self):
+        for topic in ("config", "login", "logout", "chats", "read", "send", "watch", "help"):
+            with self.subTest(topic=topic):
+                result = self.command("help", topic)
+                flag = self.command(topic, "--help")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, flag.stdout)
+                self.assertIn(f"usage: tcli {topic}", result.stdout)
+
+    def test_invalid_commands_remain_errors(self):
+        for args in (("help", "unknown"), ("unknown",), ("send",),
+                     ("read", "me", "--limit", "0")):
+            with self.subTest(args=args):
+                result = self.command(*args)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("error:", result.stderr)
 
 
 class ConfigTests(unittest.TestCase):
@@ -116,9 +163,9 @@ class CliTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(id=-1002, name="Чат", input_entity="second"),
         ])
         self.assertEqual(await tg.resolve_chat(client, "-1002"), "second")
-        with self.assertRaisesRegex(ValueError, "Несколько"):
+        with self.assertRaisesRegex(ValueError, "Multiple chats"):
             await tg.resolve_chat(client, "Чат")
-        with self.assertRaisesRegex(ValueError, "не найден"):
+        with self.assertRaisesRegex(ValueError, "Chat not found"):
             await tg.resolve_chat(client, "Нет")
 
     async def test_send_literal_text_once(self):
