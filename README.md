@@ -38,15 +38,15 @@ It uses the Telegram API and acts as your personal account. You need your own
 - **Built-in help:** `tcli`, `tcli help`, and `tcli help <command>` work without an account.
 - **AI agent skills:** project instructions for Codex and Claude Code.
 
-Reading history does not mark messages as read. Outgoing text is sent literally,
-without Markdown parsing. Terminal control characters are removed from displayed messages.
+Reading history does not mark messages as read. Outgoing text is literal by default;
+use `--format markdown` or `--format html` for formatting. Terminal control characters
+are removed from displayed messages.
 
 ### Current scope
 
-One local account session, text messages, and human-readable output.
+One local account session, text messages, human-readable output, and optional JSON.
 Media is shown as a placeholder; uploading and downloading attachments are not implemented.
-Message editing, deletion, replies to specific messages, a full-screen interface,
-and JSON output are not available.
+Message editing, deletion, and a full-screen interface are not available.
 
 ## Installation
 
@@ -163,6 +163,69 @@ Unknown commands and invalid arguments still return an error.
 | `tcli watch "Chat"` | Follow new messages until `Ctrl+C` |
 | `tcli logout` | Revoke this CLI session, keeping API credentials |
 | `tcli help [COMMAND]` | Show general or command-specific help |
+| `tcli doctor [--connect]` | Check local configuration/session; optionally test connectivity and authorization |
+
+### JSON, search, pagination, and replies
+
+```console
+tcli chats --json
+tcli read "Chat" --json --limit 20
+tcli watch "Chat" --json
+tcli read "Chat" --search "meeting" --before 12345 --limit 20
+tcli send "Chat" "Reply text" --reply-to 12345
+tcli send me --file message.txt
+```
+
+`chats --json` and `read --json` return JSON arrays, including `[]` for empty results.
+Chat objects contain `id`, `name`, and `unread_count`. Message objects contain `id`,
+`chat_id`, `date` (ISO 8601 with offset), `sender_id` (nullable), `out`, `text`, and `has_media`.
+JSON preserves original text, including Unicode and control characters as escaped sequences;
+human-readable output removes terminal controls. Media-only messages have empty JSON text.
+`watch --json` emits one message object per line (JSONL), flushing immediately.
+Watch status and errors go to stderr, keeping stdout machine-readable.
+
+`--search` uses Telegram's text search within the selected chat. Results remain oldest first
+within each returned page. `--before ID` excludes that ID and returns older messages;
+use the smallest returned message ID for the next page. It can be combined with search.
+`--before` and `--reply-to` require positive message IDs from the same chat.
+
+`send` requires exactly one text source: a positional text argument, `--stdin`, or `--file PATH`.
+Files and stdin use UTF-8 (an optional BOM is accepted). Stdin is read until EOF;
+empty or whitespace-only input is rejected before connecting. Line breaks and surrounding
+whitespace are kept in plain mode. `--file` sends the file's text, not an attachment.
+All text sources support `--reply-to` and `--format`.
+
+### Text formatting
+
+```console
+tcli send me '**Bold** __italic__ ~~strike~~ `code` [link](https://example.com)' --format markdown
+tcli send me '<b>Bold</b> <i>italic</i> <u>underline</u> <s>strike</s>' --format html
+tcli send me '<blockquote>Quote</blockquote>' --format html
+tcli send me --file message.html --format html --reply-to 12345
+```
+
+`--format plain` (the default) sends markup literally. Markdown is Telethon's dialect,
+not Telegram Bot API MarkdownV2: `**bold**`, `__italic__`, `~~strike~~`, backticks for code,
+triple backticks for code blocks, and `[label](URL)`. Use HTML for underline and nested
+formatting. Supported HTML includes `<b>`, `<strong>`, `<i>`, `<em>`, `<u>`, `<s>`, `<del>`,
+`<code>`, `<pre>`, `<a href="URL">`, and `<blockquote>` (also `expandable`).
+`<pre><code class="language-python">...</code></pre>` specifies a code-block language.
+HTML escapes use `&lt;`, `&gt;`, and `&amp;`. Use actual line breaks, not `<br>`.
+The installed Telethon parser does not support spoiler markup; unknown HTML tags are ignored.
+Telegram may trim surrounding whitespace when parsing formatted text.
+
+PowerShell pipeline example (ensure the shell sends UTF-8):
+
+```powershell
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+Get-Content -Raw -Encoding utf8 message.txt | tcli send me --stdin
+```
+
+`doctor` prints configuration/session paths, validates the effective API credentials without
+showing their values, and checks session-file presence without connecting or creating files.
+It exits 1 on invalid configuration or a missing session. File presence does not prove authorization.
+`doctor --connect` requires an existing session and additionally connects to Telegram and checks
+authorization without prompting for login or reading chats. It may update the existing Telethon session.
 
 ### Choosing a chat
 
@@ -179,7 +242,11 @@ tcli watch -- -1001234567890
 ```
 
 The ID above is an example; use an ID from your chat list. Limits must be positive integers.
-`watch` displays only new messages. Open a second terminal to send while watching.
+`watch` records the latest message ID at startup and checks for newer messages every two seconds.
+It includes outgoing messages from another CLI process, including Saved Messages, and outputs
+each fetched batch oldest first without a fixed batch limit. Already existing messages are not printed.
+Messages deleted before the next check cannot be displayed. Open a second terminal to send while watching.
+Session changes are committed between checks so the watcher does not hold a SQLite write lock while idle.
 Timestamps use your computer's local time zone.
 
 ## Configuration and session
@@ -240,7 +307,8 @@ Linux / macOS, after installing in `.venv`:
 ```
 
 Tests run without a real account: they cover help, argument validation, chat resolution,
-message handling with a fake client, and configuration preservation on errors.
+JSON/JSONL, search and pagination arguments, replies, stdin/files, diagnostics, login/logout,
+watch polling/cursors, formatting selection, error exit codes, disconnects, and configuration preservation on errors.
 They do not verify a real Telegram login or message delivery.
 
 ```text

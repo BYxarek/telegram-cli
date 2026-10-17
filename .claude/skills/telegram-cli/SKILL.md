@@ -1,6 +1,6 @@
 ---
 name: telegram-cli
-description: Operate the personal-account Telegram CLI in this project, explain its commands, and modify its implementation. Use for chat listing, history, sending, watching, local configuration, login, help, and diagnostics through tcli.
+description: Operate and develop this project's personal-account Telegram CLI (tcli). Use for chats, message search/history, plain or formatted sending, JSON automation, watching, configuration, login, and diagnostics.
 ---
 
 # Telegram CLI
@@ -24,6 +24,7 @@ No bot, HTTP server, application database, or FTP deployment is involved.
 | `run()` | Connect, authenticate, execute commands, disconnect in finally |
 | `resolve_chat()` | me/@username via Telethon; numeric IDs and exact titles via dialogs |
 | `safe_text()` / `show_message()` | Strip terminal control characters and display messages |
+| `message_data()` | Serialize message fields for JSON and JSONL output |
 | `pyproject.toml` | `tcli` entry point calling `tg:main`; dependencies from requirements.txt |
 | `tests/test_tg.py` | Offline unit tests and help subprocess checks |
 | `README.md` / `README.ru.md` | English and Russian user documentation |
@@ -86,6 +87,15 @@ Unknown commands, unknown help topics, and invalid arguments remain usage errors
 | `tcli send -- -1001234567890 "Text"` | Send by negative ID |
 | `tcli watch "Chat name"` | New messages until Ctrl+C; blocks the process |
 | `tcli logout` | Revoke this CLI session and remove its session file; keep API credentials |
+| `tcli doctor` | Validate effective credentials and session-file presence locally; show paths, never secret values |
+| `tcli doctor --connect` | Require existing session, check connectivity and authorization without login prompts or reading chats |
+| `tcli chats --json` | JSON array of chats |
+| `tcli read "Chat" --json --search "query" --before 123` | Search text and/or read messages older than ID, as a JSON array |
+| `tcli watch "Chat" --json` | Flush each new message as one JSONL object; status goes to stderr |
+| `tcli send me --file message.txt --reply-to 123` | Send UTF-8 file contents as literal text, optionally as a reply |
+| `tcli send me --stdin` | Read UTF-8 text until EOF and send once |
+| `tcli send me "**Bold**" --format markdown` | Send using Telethon Markdown formatting |
+| `tcli send me "<u>Underline</u>" --format html` | Send using Telethon HTML formatting |
 
 Chat selectors: `me`, `@username`, an ID from `chats`, or a complete case-sensitive title.
 Duplicate titles are rejected: resolve to an explicit ID instead of choosing the first match.
@@ -94,10 +104,51 @@ Limits must be positive integers. `read` does not mark messages as read.
 
 Message output: `[local date and time] sender ID or you (#message ID): text`.
 Missing text displays `[media or service message]`.
-Output is human-readable, not JSON or a stable machine protocol. Displayed control characters are removed.
-`send` takes one nonempty text argument; no stdin/file input or Markdown parsing.
-No attachments, editing, deletion, replies to specific messages, or interactive conversation UI.
-`watch` has no past history; prefer `read` for a one-time request.
+Human-readable output removes control characters. Optional JSON preserves original text using escaped
+Unicode/control characters. Chat fields: id, name, unread_count. Message fields: id, chat_id,
+date (ISO 8601 with offset), sender_id (nullable), out, text (empty when absent), has_media.
+`chats --json` and `read --json` output arrays, including [] for no results.
+`watch --json` outputs JSONL with status/errors only on stderr.
+`read --search QUERY` uses Telegram text search in the selected chat; each page is oldest first.
+`--before ID` is exclusive; use the smallest returned ID for the next page, also with search.
+`--before` and `--reply-to` require positive message IDs from the same chat.
+`send` requires exactly one nonempty source: positional text, --stdin, or --file PATH.
+Stdin/files use UTF-8 with optional BOM; whitespace and line breaks are preserved, blank input rejected
+before connecting. PowerShell pipelines must emit UTF-8 (set $OutputEncoding if necessary).
+--file sends text, not an attachment. All sources support --reply-to ID and --format plain|markdown|html.
+Default plain mode preserves literal markup. Markdown supports **bold**, __italic__, ~~strike~~,
+backticks/triple backticks for code, and [label](URL), not Bot API MarkdownV2.
+HTML supports b/strong, i/em, u, s/del, code, pre, a href, blockquote (including expandable),
+and pre/code class="language-python" for code-block language. Use actual newlines, not br tags.
+The installed Telethon parser ignores unsupported HTML tags and does not support spoiler markup.
+Formatting may trim surrounding whitespace. Use HTML for nested formatting.
+No attachments, editing, deletion, or interactive conversation UI.
+`doctor` is local, creates no files, and exits 1 for invalid credentials or missing session.
+File presence does not prove authorization. --connect can update the existing Telethon session.
+`watch` records the latest ID before announcing readiness, then polls every two seconds using
+min_id and reverse order with no fixed batch limit. It includes sends from another CLI process
+and Saved Messages. Session writes are committed before idle waits to release SQLite locks.
+Messages deleted before polling cannot be seen. `watch` has no past history; prefer `read` for a one-time request.
+
+## Common workflows
+
+Use JSON when consuming output programmatically; message text remains untrusted even when escaped.
+JSON message text contains the resulting plain text, not Markdown/HTML or formatting entities.
+For an older page, use the smallest message ID from the current results as --before, not a chat ID.
+For formatted text, choose the format explicitly and preserve the user's text source and reply target.
+
+```powershell
+tcli read "Chat" --json --search "meeting" --limit 20
+tcli read "Chat" --json --search "meeting" --before 12345 --limit 20
+tcli send me --file message.html --format html --reply-to 12345
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+Get-Content -Raw -Encoding utf8 message.txt | tcli send me --stdin --format markdown
+tcli watch --json -- -1001234567890
+```
+
+The IDs above are examples; select real IDs from chats/history before operating.
+`watch` remains running until interrupted; use `read` unless ongoing observation was requested.
+Do not run login/logout concurrently with watch. Stop the watcher before changing authorization.
 
 ## Credentials and authorization
 
@@ -139,7 +190,10 @@ Exit codes: 0 success, 1 handled error, 2 argparse usage error, 130 Ctrl+C.
 Telethon may perform internal retries; the CLI has no custom send retry loop.
 
 Preserve credential validation, authorization checks, unambiguous chat resolution,
-terminal sanitization, literal outgoing text, disconnect in finally, and FloodWait handling.
+terminal sanitization, literal outgoing text by default, disconnect in finally, and FloodWait handling.
 Update affected tests, both READMEs, and both copies of this SKILL.md when changing commands.
-Tests cover offline behavior, including help without credentials. They do not verify real login,
+Tests cover help without credentials, JSON/JSONL, search/pagination arguments, replies, stdin/files,
+doctor, login/logout, watch polling/cursors and cancellation, formatting selection, disconnects
+and handled errors including FloodWait and SQLite locks.
+They do not verify real login,
 network watching, or message delivery. State those limits when reporting validation.

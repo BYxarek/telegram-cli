@@ -7,11 +7,12 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import sys
 import tempfile
 import unicodedata
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.errors import FloodWaitError, RPCError
 
 
@@ -46,13 +47,17 @@ Help works without configuration or a Telegram login.''')
                         description="Sign in with your phone number, login code, and optional 2FA password.")
     commands.add_parser("logout", help="Revoke this CLI session",
                         description="Revoke this CLI session. API credentials are kept for your next login.")
+    doctor = commands.add_parser("doctor", help="Check configuration and session without showing secrets")
+    doctor.add_argument("--connect", action="store_true",
+                        help="also check Telegram connectivity and authorization using the existing session")
     chats = commands.add_parser("chats", help="List chats and their IDs",
                                 description="List chat IDs, names, and unread counts.")
     chats.add_argument("--limit", type=positive_int, default=50, metavar="N",
                        help="maximum number of chats (default: 50)")
+    chats.add_argument("--json", action="store_true", help="output a JSON array")
     for name, help_text, example in (
             ("read", "Read recent messages, oldest first", 'tcli read "Chat name" --limit 10'),
-            ("send", "Send a plain-text message", 'tcli send me "Hello from tcli!"'),
+            ("send", "Send a text message with optional formatting", 'tcli send me "Hello from tcli!"'),
             ("watch", "Follow new messages until Ctrl+C", 'tcli watch -- -1001234567890')):
         command = commands.add_parser(name, help=help_text, description=help_text,
                                        epilog=f"Example: {example}")
@@ -61,8 +66,20 @@ Help works without configuration or a Telegram login.''')
         if name == "read":
             command.add_argument("--limit", type=positive_int, default=20, metavar="N",
                                  help="number of recent messages (default: 20)")
+            command.add_argument("--before", type=positive_int, metavar="ID",
+                                 help="read messages older than this message ID (exclusive)")
+            command.add_argument("--search", metavar="QUERY", help="search message text using Telegram search")
+            command.add_argument("--json", action="store_true", help="output a JSON array")
         elif name == "send":
-            command.add_argument("text", metavar="TEXT", help="message text in quotes; Markdown is not interpreted")
+            source = command.add_mutually_exclusive_group(required=True)
+            source.add_argument("text", nargs="?", metavar="TEXT", help="literal message text in quotes")
+            source.add_argument("--stdin", action="store_true", help="read UTF-8 text from stdin until EOF")
+            source.add_argument("--file", type=Path, metavar="PATH", help="read text from a UTF-8 file")
+            command.add_argument("--reply-to", type=positive_int, metavar="ID", help="reply to a message in this chat")
+            command.add_argument("--format", choices=("plain", "markdown", "html"), default="plain",
+                                 help="text formatting (default: plain); uses Telethon Markdown or HTML")
+        else:
+            command.add_argument("--json", action="store_true", help="output one JSON object per line (JSONL)")
     help_command = commands.add_parser("help", help="Show general or command-specific help",
                                        description="Show help without connecting to Telegram.")
     help_command.add_argument("topic", nargs="?", metavar="COMMAND", help="command to explain, for example: send")
@@ -126,6 +143,13 @@ def show_message(message):
     print(f"[{date}] {sender} (#{message.id}): {safe_text(body)}", flush=True)
 
 
+def message_data(message):
+    return {"id": message.id, "chat_id": message.chat_id,
+            "date": message.date.isoformat(), "sender_id": message.sender_id,
+            "out": message.out, "text": message.raw_text or "",
+            "has_media": bool(message.media)}
+
+
 async def resolve_chat(client, value):
     if value == "me" or value.startswith("@"):
         return await client.get_input_entity(value)
@@ -142,8 +166,8 @@ async def resolve_chat(client, value):
 
 
 async def run(client, args):
-    await client.connect()
     try:
+        await client.connect()
         if args.command == "login":
             phone = input("Phone number with country code: ").strip()
             if not re.fullmatch(r"\+\d{7,15}", phone):
@@ -159,30 +183,62 @@ async def run(client, args):
             return
         if not await client.is_user_authorized():
             raise ValueError("You are not signed in. Run: tcli login")
-        if args.command == "logout":
+        if args.command == "doctor":
+            print("Telegram connection: OK\nSession authorization: OK")
+        elif args.command == "logout":
             await client.log_out()
             print("CLI session revoked.")
         elif args.command == "chats":
+            dialogs = []
             async for dialog in client.iter_dialogs(limit=args.limit):
-                name = safe_text(dialog.name).replace("\n", " ").replace("\t", " ")
-                print(f"{dialog.id}\t{name}\tunread: {dialog.unread_count}")
+                if args.json:
+                    dialogs.append({"id": dialog.id, "name": dialog.name, "unread_count": dialog.unread_count})
+                else:
+                    name = safe_text(dialog.name).replace("\n", " ").replace("\t", " ")
+                    print(f"{dialog.id}\t{name}\tunread: {dialog.unread_count}")
+            if args.json:
+                print(json.dumps(dialogs))
         else:
             chat = await resolve_chat(client, args.chat)
             if args.command == "read":
-                messages = await client.get_messages(chat, limit=args.limit)
-                for message in reversed(messages):
-                    show_message(message)
+                options = {}
+                if args.before is not None:
+                    options["offset_id"] = args.before
+                if args.search is not None:
+                    options["search"] = args.search
+                messages = await client.get_messages(chat, limit=args.limit, **options)
+                if args.json:
+                    print(json.dumps([message_data(message) for message in reversed(messages)]))
+                else:
+                    for message in reversed(messages):
+                        show_message(message)
             elif args.command == "send":
                 if not args.text.strip():
                     raise ValueError("Message text must not be empty.")
-                message = await client.send_message(chat, args.text, parse_mode=None)
+                options = {}
+                if args.reply_to is not None:
+                    options["reply_to"] = args.reply_to
+                mode = None if args.format == "plain" else args.format
+                message = await client.send_message(chat, args.text, parse_mode=mode, **options)
                 print(f"Message sent. ID: {message.id}")
             elif args.command == "watch":
-                async def on_message(event):
-                    show_message(event.message)
-                client.add_event_handler(on_message, events.NewMessage(chats=chat))
-                print("Watching for new messages. Press Ctrl+C to stop.", flush=True)
-                await client.run_until_disconnected()
+                latest = await client.get_messages(chat, limit=1)
+                last_id = latest[0].id if latest else 0
+                client.session.save()
+                print("Watching for new messages. Press Ctrl+C to stop.",
+                      file=sys.stderr if args.json else sys.stdout, flush=True)
+                # Shared authorizations do not reliably receive each other's outgoing updates.
+                while client.is_connected():
+                    messages = await client.get_messages(chat, min_id=last_id, reverse=True, limit=None)
+                    # Commit entity-cache writes before sleeping so other CLI processes can use SQLite.
+                    client.session.save()
+                    for message in messages:
+                        if args.json:
+                            print(json.dumps(message_data(message)), flush=True)
+                        else:
+                            show_message(message)
+                        last_id = message.id
+                    await asyncio.sleep(2)
     finally:
         await client.disconnect()
 
@@ -203,7 +259,26 @@ def main():
         if args.command == "config":
             configure(config_path)
             return 0
+        if args.command == "send":
+            if args.stdin:
+                sys.stdin.reconfigure(encoding="utf-8-sig")
+                args.text = sys.stdin.read()
+            elif args.file is not None:
+                args.text = args.file.read_text(encoding="utf-8-sig")
+            if not args.text.strip():
+                raise ValueError("Message text must not be empty.")
+        if args.command == "doctor":
+            print(f"Configuration path: {safe_text(config_path)}")
+            print(f"Session path: {safe_text(session_dir / 'account.session')}")
         api_id, api_hash = load_credentials(config_path)
+        if args.command == "doctor":
+            print("API credentials: valid (values hidden)")
+            if not (session_dir / "account.session").is_file():
+                raise ValueError("Session file is missing. Run: tcli login")
+            print("Session file: present (authorization not checked locally)")
+            if not args.connect:
+                print("Use tcli doctor --connect to check Telegram connectivity and authorization.")
+                return 0
         session_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         client = TelegramClient(str(session_dir / "account"), api_id, api_hash,
                                 flood_sleep_threshold=0)
@@ -213,7 +288,7 @@ def main():
     except FloodWaitError as error:
         print(f"Telegram rate limit: wait {error.seconds} seconds before trying again.", file=sys.stderr)
         return 1
-    except (ValueError, RPCError, OSError, EOFError) as error:
+    except (ValueError, RPCError, OSError, EOFError, sqlite3.Error) as error:
         print(f"Error: {safe_text(error)}", file=sys.stderr)
         return 1
     return 0

@@ -3,10 +3,14 @@ import json
 import os
 import subprocess
 import sys
+import io
+import sqlite3
+from datetime import datetime, timezone
+from contextlib import ExitStack, redirect_stdout, redirect_stderr
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import tg
 
@@ -39,7 +43,7 @@ class HelpTests(unittest.TestCase):
         self.assertTrue(all(output == outputs[0] for output in outputs))
 
     def test_command_help_matches_help_flag(self):
-        for topic in ("config", "login", "logout", "chats", "read", "send", "watch", "help"):
+        for topic in ("config", "login", "logout", "doctor", "chats", "read", "send", "watch", "help"):
             with self.subTest(topic=topic):
                 result = self.command("help", topic)
                 flag = self.command(topic, "--help")
@@ -49,6 +53,11 @@ class HelpTests(unittest.TestCase):
 
     def test_invalid_commands_remain_errors(self):
         for args in (("help", "unknown"), ("unknown",), ("send",),
+                     ("send", "me"), ("send", "me", "text", "--stdin"),
+                     ("send", "me", "--stdin", "--file", "text.txt"),
+                     ("send", "me", "text", "--reply-to", "0"),
+                     ("send", "me", "text", "--format", "unknown"),
+                     ("read", "me", "--before", "0"),
                      ("read", "me", "--limit", "0")):
             with self.subTest(args=args):
                 result = self.command(*args)
@@ -141,6 +150,11 @@ class FakeClient:
         self.get_input_entity = AsyncMock(return_value="self")
         self.send_message = AsyncMock(return_value=SimpleNamespace(id=42))
         self.get_messages = AsyncMock(return_value=[])
+        self.start = AsyncMock()
+        self.get_me = AsyncMock(return_value=SimpleNamespace(bot=False, first_name="User", id=1))
+        self.log_out = AsyncMock()
+        self.is_connected = Mock(return_value=False)
+        self.session = SimpleNamespace(save=Mock())
 
     async def iter_dialogs(self, **kwargs):
         for dialog in self.dialogs:
@@ -184,6 +198,15 @@ class CliTests(unittest.IsolatedAsyncioTestCase):
         client.send_message.assert_not_awaited()
         client.disconnect.assert_awaited_once()
 
+    async def test_send_explicit_formats_with_reply(self):
+        for mode in ("plain", "markdown", "html"):
+            client = FakeClient()
+            with patch("builtins.print"):
+                await tg.run(client, tg.parser().parse_args(
+                    ["send", "me", "**text**", "--format", mode, "--reply-to", "1"]))
+            client.send_message.assert_awaited_once_with(
+                "self", "**text**", parse_mode=None if mode == "plain" else mode, reply_to=1)
+
     async def test_read_prints_chronologically(self):
         client = FakeClient()
         client.get_messages.return_value = ["new", "old"]
@@ -197,6 +220,246 @@ class CliTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(OSError):
             await tg.run(client, tg.parser().parse_args(["send", "me", "Привет"]))
         client.disconnect.assert_awaited_once()
+
+    async def test_disconnect_on_connect_error(self):
+        client = FakeClient()
+        client.connect.side_effect = OSError("offline")
+        with self.assertRaises(OSError):
+            await tg.run(client, tg.parser().parse_args(["read", "me"]))
+        client.disconnect.assert_awaited_once()
+
+    async def test_reply_once_and_reject_blank_text(self):
+        client = FakeClient()
+        with patch("builtins.print"):
+            await tg.run(client, tg.parser().parse_args(["send", "me", "reply", "--reply-to", "123"]))
+        client.send_message.assert_awaited_once_with("self", "reply", parse_mode=None, reply_to=123)
+        client.send_message.reset_mock()
+        with self.assertRaisesRegex(ValueError, "empty"):
+            await tg.run(client, tg.parser().parse_args(["send", "me", " \n"]))
+        client.send_message.assert_not_awaited()
+
+    def message(self, message_id=1, text="Привет\n\x1b\u202e"):
+        return SimpleNamespace(id=message_id, chat_id=-1001, date=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                               sender_id=2, out=False, raw_text=text, media=None)
+
+    async def test_json_history_search_and_pagination(self):
+        client = FakeClient()
+        client.get_messages.return_value = [self.message(2), self.message(1, None)]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            await tg.run(client, tg.parser().parse_args(
+                ["read", "me", "--json", "--search", "Привет", "--before", "9", "--limit", "2"]))
+        client.get_messages.assert_awaited_once_with("self", limit=2, search="Привет", offset_id=9)
+        rows = json.loads(output.getvalue())
+        self.assertEqual([row["id"] for row in rows], [1, 2])
+        self.assertEqual(rows[0]["text"], "")
+        self.assertEqual(rows[1], {"id": 2, "chat_id": -1001, "date": "2026-01-01T00:00:00+00:00",
+                                  "sender_id": 2, "out": False, "text": "Привет\n\x1b\u202e", "has_media": False})
+        self.assertNotIn("\x1b", output.getvalue())
+        self.assertNotIn("\u202e", output.getvalue())
+
+    async def test_json_chats_and_empty_arrays(self):
+        for dialogs in ([], [SimpleNamespace(id=1, name="Чат\n\x1b", unread_count=3)]):
+            client = FakeClient(dialogs)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                await tg.run(client, tg.parser().parse_args(["chats", "--json"]))
+            self.assertEqual(json.loads(output.getvalue()),
+                             [{"id": d.id, "name": d.name, "unread_count": d.unread_count} for d in dialogs])
+        output = io.StringIO()
+        with redirect_stdout(output):
+            await tg.run(FakeClient(), tg.parser().parse_args(["read", "me", "--json"]))
+        self.assertEqual(json.loads(output.getvalue()), [])
+
+    async def test_watch_output_and_disconnect(self):
+        for json_mode in (False, True):
+            client = FakeClient()
+            client.is_connected.side_effect = [True, False]
+            client.get_messages.side_effect = [[self.message(10)], [self.message(11), self.message(12)]]
+            output, errors = io.StringIO(), io.StringIO()
+            args = ["watch", "me"] + (["--json"] if json_mode else [])
+            with redirect_stdout(output), redirect_stderr(errors), patch("tg.asyncio.sleep", new_callable=AsyncMock):
+                await tg.run(client, tg.parser().parse_args(args))
+            if json_mode:
+                self.assertEqual([json.loads(line)["id"] for line in output.getvalue().splitlines()], [11, 12])
+                self.assertIn("Watching", errors.getvalue())
+            else:
+                self.assertIn("Watching", output.getvalue())
+                self.assertIn("(#11):", output.getvalue())
+                self.assertNotIn("\x1b", output.getvalue())
+            self.assertNotIn("(#10):", output.getvalue())
+            self.assertEqual(client.get_messages.await_args_list,
+                             [call("self", limit=1), call("self", min_id=10, reverse=True, limit=None)])
+            self.assertEqual(client.session.save.call_count, 2)
+            client.disconnect.assert_awaited_once()
+
+    async def test_watch_empty_chat_and_cursor_progress(self):
+        client = FakeClient()
+        client.is_connected.side_effect = [True, True, True, False]
+        client.get_messages.side_effect = [[], [self.message(1)], [], [self.message(2)]]
+        async def pause(seconds):
+            self.assertEqual(seconds, 2)
+            self.assertEqual(client.session.save.call_count, client.get_messages.await_count)
+        with patch("tg.asyncio.sleep", side_effect=pause), patch("tg.show_message") as show, patch("builtins.print"):
+            await tg.run(client, tg.parser().parse_args(["watch", "me"]))
+        self.assertEqual([entry.args[0].id for entry in show.call_args_list], [1, 2])
+        self.assertEqual([entry.kwargs.get("min_id") for entry in client.get_messages.await_args_list], [None, 0, 1, 1])
+
+    async def test_watch_releases_real_sqlite_write_lock_before_wait(self):
+        from telethon.sessions import SQLiteSession
+        with TemporaryDirectory() as directory:
+            path = str(Path(directory) / "account")
+            client = FakeClient()
+            client.session = SQLiteSession(path)
+            client.is_connected.side_effect = [True, False]
+            async def fetch(*args, **kwargs):
+                client.session.set_dc(2, "149.154.167.51", 443)
+                return []
+            client.get_messages.side_effect = fetch
+            async def pause(seconds):
+                connection = sqlite3.connect(path + ".session", timeout=0)
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.rollback()
+                finally:
+                    connection.close()
+            try:
+                with patch("tg.asyncio.sleep", side_effect=pause), patch("builtins.print"):
+                    await tg.run(client, tg.parser().parse_args(["watch", "me"]))
+            finally:
+                client.session.close()
+
+    async def test_watch_cancellation_disconnects(self):
+        import asyncio
+        client = FakeClient()
+        client.is_connected.return_value = True
+        with patch("tg.asyncio.sleep", side_effect=asyncio.CancelledError), patch("builtins.print"):
+            with self.assertRaises(asyncio.CancelledError):
+                await tg.run(client, tg.parser().parse_args(["watch", "me"]))
+        client.disconnect.assert_awaited_once()
+
+    async def test_watch_error_disconnects(self):
+        client = FakeClient()
+        client.is_connected.return_value = True
+        client.get_messages.side_effect = [[], OSError("offline")]
+        with patch("builtins.print"), self.assertRaises(OSError):
+            await tg.run(client, tg.parser().parse_args(["watch", "me"]))
+        client.disconnect.assert_awaited_once()
+
+    async def test_login_logout_and_bot_rejection(self):
+        for bot in (False, True):
+            client = FakeClient()
+            client.get_me.return_value.bot = bot
+            with patch("builtins.input", return_value="+15551234567"), patch("builtins.print"):
+                if bot:
+                    with self.assertRaisesRegex(ValueError, "personal"):
+                        await tg.run(client, tg.parser().parse_args(["login"]))
+                    client.log_out.assert_awaited_once()
+                else:
+                    await tg.run(client, tg.parser().parse_args(["login"]))
+                    client.start.assert_awaited_once()
+            client.disconnect.assert_awaited_once()
+        client = FakeClient()
+        with patch("builtins.print"):
+            await tg.run(client, tg.parser().parse_args(["logout"]))
+        client.log_out.assert_awaited_once()
+        client.disconnect.assert_awaited_once()
+
+    async def test_invalid_phone_does_not_login(self):
+        client = FakeClient()
+        with patch("builtins.input", return_value="invalid"), self.assertRaisesRegex(ValueError, "international"):
+            await tg.run(client, tg.parser().parse_args(["login"]))
+        client.start.assert_not_awaited()
+        client.disconnect.assert_awaited_once()
+
+
+class MainTests(unittest.TestCase):
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.directory = Path(self.stack.enter_context(TemporaryDirectory()))
+        self.stack.enter_context(patch.dict(os.environ, {"LOCALAPPDATA": str(self.directory),
+                                                       "TG_API_ID": "123", "TG_API_HASH": "a" * 32}, clear=True))
+        self.output, self.errors = io.StringIO(), io.StringIO()
+        self.stack.enter_context(patch("tg.sys.stdout", self.output))
+        self.stack.enter_context(patch("tg.sys.stderr", self.errors))
+        self.output.reconfigure = lambda **kwargs: None
+        self.errors.reconfigure = lambda **kwargs: None
+        self.client = FakeClient()
+        self.factory = self.stack.enter_context(patch("tg.TelegramClient", return_value=self.client))
+
+    def main(self, *args):
+        with patch("sys.argv", ["tcli", *args]):
+            return tg.main()
+
+    def test_send_file_and_stdin_preserve_multiline_text(self):
+        text = "Привет\n**literal**\n"
+        path = self.directory / "message.txt"
+        path.write_text(text, encoding="utf-8-sig")
+        for args in (("send", "me", "--file", str(path)), ("send", "me", "--stdin")):
+            with io.TextIOWrapper(io.BytesIO(text.encode("utf-8")), encoding="utf-8") as stream, patch("sys.stdin", stream):
+                self.assertEqual(self.main(*args), 0)
+            self.client.send_message.assert_awaited_once_with("self", text, parse_mode=None)
+            self.client.send_message.reset_mock()
+
+    def test_file_and_stdin_support_formatting(self):
+        text = "<b>Bold</b> <u>underlined</u>"
+        path = self.directory / "message.html"
+        path.write_text(text, encoding="utf-8")
+        for args in (("send", "me", "--file", str(path), "--format", "html"),
+                     ("send", "me", "--stdin", "--format", "html")):
+            with io.TextIOWrapper(io.BytesIO(text.encode()), encoding="utf-8") as stream, patch("sys.stdin", stream):
+                self.assertEqual(self.main(*args), 0)
+            self.client.send_message.assert_awaited_once_with("self", text, parse_mode="html")
+            self.client.send_message.reset_mock()
+
+    def test_invalid_input_does_not_connect(self):
+        path = self.directory / "message.txt"
+        for content in (b" \n", b"\xff"):
+            path.write_bytes(content)
+            self.assertEqual(self.main("send", "me", "--file", str(path)), 1)
+        path.unlink()
+        self.assertEqual(self.main("send", "me", "--file", str(path)), 1)
+        self.factory.assert_not_called()
+
+    def test_doctor_local_and_connected(self):
+        self.assertEqual(self.main("doctor"), 1)
+        self.assertFalse((self.directory / "telegram-cli").exists())
+        self.factory.assert_not_called()
+        session = self.directory / "telegram-cli" / "account.session"
+        session.parent.mkdir()
+        session.touch()
+        self.assertEqual(self.main("doctor"), 0)
+        self.factory.assert_not_called()
+        self.assertEqual(self.main("doctor", "--connect"), 0)
+        self.client.is_user_authorized.assert_awaited_once()
+        self.client.disconnect.assert_awaited_once()
+        self.assertNotIn("a" * 32, self.output.getvalue() + self.errors.getvalue())
+
+    def test_doctor_invalid_configuration_and_unauthorized_session(self):
+        with patch.dict(os.environ, {"TG_API_HASH": "invalid"}):
+            self.assertEqual(self.main("doctor"), 1)
+        self.factory.assert_not_called()
+        session = self.directory / "telegram-cli" / "account.session"
+        session.parent.mkdir()
+        session.touch()
+        self.client.is_user_authorized.return_value = False
+        self.assertEqual(self.main("doctor", "--connect"), 1)
+        self.assertIn("tcli login", self.errors.getvalue())
+
+    def test_handled_errors_and_exit_codes(self):
+        for error, code, expected in (
+                (tg.FloodWaitError(request=None, capture=17), 1, "wait 17 seconds"),
+                (tg.RPCError(request=None, message="denied", code=400), 1, "denied"),
+                (OSError("offline"), 1, "offline"),
+                (sqlite3.OperationalError("database is locked"), 1, "database is locked"),
+                (KeyboardInterrupt(), 130, "")):
+            with self.subTest(error=type(error).__name__):
+                self.client.connect.side_effect = error
+                self.client.disconnect.reset_mock()
+                self.assertEqual(self.main("read", "me"), code)
+                self.assertIn(expected, self.errors.getvalue())
+                self.client.disconnect.assert_awaited_once()
 
 
 if __name__ == "__main__":
