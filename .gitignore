@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.session*
+.env
+.env.*
+config.json
+.config-*.tmp
+*.egg-info/
+build/
+dist/
+.DS_Store
+Thumbs.db
