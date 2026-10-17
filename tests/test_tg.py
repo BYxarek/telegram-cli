@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call, patch
 
 import tg
+from importlib.resources import files
 
 
 class HelpTests(unittest.TestCase):
@@ -43,7 +44,7 @@ class HelpTests(unittest.TestCase):
         self.assertTrue(all(output == outputs[0] for output in outputs))
 
     def test_command_help_matches_help_flag(self):
-        for topic in ("config", "login", "logout", "doctor", "chats", "read", "send", "watch", "help"):
+        for topic in ("config", "login", "logout", "doctor", "chats", "read", "send", "watch", "skills", "help"):
             with self.subTest(topic=topic):
                 result = self.command("help", topic)
                 flag = self.command(topic, "--help")
@@ -63,6 +64,89 @@ class HelpTests(unittest.TestCase):
                 result = self.command(*args)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("error:", result.stderr)
+
+    def test_version_and_nested_help_without_configuration(self):
+        result = self.command("--version")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), tg.__version__)
+        result = self.command("skills", "install", "--help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--agent", result.stdout)
+        for args in (("skills",), ("skills", "unknown"), ("skills", "install", "--agent", "unknown")):
+            self.assertEqual(self.command(*args).returncode, 2)
+
+
+class SkillsTests(unittest.TestCase):
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.home = Path(self.stack.enter_context(TemporaryDirectory()))
+        self.stack.enter_context(patch("tg.Path.home", return_value=self.home))
+        self.stack.enter_context(patch("builtins.print"))
+        self.content = files("tcli_skills").joinpath("SKILL.md").read_bytes()
+
+    def path(self, agent):
+        return self.home / (".agents" if agent == "codex" else ".claude") / "skills" / "telegram-cli" / "SKILL.md"
+
+    def test_install_both_is_offline_and_idempotent(self):
+        with patch.dict(os.environ, {}, clear=True), patch("sys.argv", ["tcli", "skills", "install"]), \
+                patch("tg.sys.stdout.reconfigure"), patch("tg.sys.stderr.reconfigure"), \
+                patch("tg.TelegramClient") as client:
+            self.assertEqual(tg.main(), 0)
+            client.assert_not_called()
+        tg.install_skills("all")
+        for agent in ("codex", "claude"):
+            path = self.path(agent)
+            self.assertEqual(path.read_bytes(), self.content)
+            self.assertEqual(list(path.parent.iterdir()), [path])
+
+    def test_update_backs_up_custom_text_and_preserves_other_files(self):
+        path = self.path("codex")
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"custom instructions")
+        other = path.parent / "notes.txt"
+        other.write_text("notes")
+        tg.install_skills("codex")
+        self.assertEqual(path.read_bytes(), self.content)
+        backups = list(path.parent.glob("SKILL.md.backup-*.bak"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), b"custom instructions")
+        self.assertEqual(other.read_text(), "notes")
+        self.assertFalse(self.path("claude").exists())
+
+    def test_claude_only(self):
+        tg.install_skills("claude")
+        self.assertEqual(self.path("claude").read_bytes(), self.content)
+        self.assertFalse(self.path("codex").exists())
+
+    def test_replace_failure_preserves_existing_skill(self):
+        path = self.path("codex")
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"original")
+        with patch("tg.Path.replace", side_effect=OSError("disk error")), self.assertRaises(OSError):
+            tg.install_skills("codex")
+        self.assertEqual(path.read_bytes(), b"original")
+        self.assertEqual(len(list(path.parent.glob("*.bak"))), 1)
+        self.assertEqual(list(path.parent.glob("*.tmp")), [])
+
+    def test_backup_failure_does_not_overwrite_skill(self):
+        path = self.path("codex")
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"original")
+        with patch("tg.tempfile.NamedTemporaryFile", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            tg.install_skills("codex")
+        self.assertEqual(path.read_bytes(), b"original")
+
+    def test_symlink_is_rejected(self):
+        path = self.path("codex")
+        with patch("tg.Path.is_symlink", return_value=True), self.assertRaisesRegex(ValueError, "symlinked"):
+            tg.install_skills("codex")
+        self.assertFalse(path.exists())
+
+    def test_bundled_and_repository_skills_match(self):
+        root = Path(__file__).resolve().parents[1]
+        for folder in (".agents", ".claude"):
+            self.assertEqual((root / folder / "skills" / "telegram-cli" / "SKILL.md").read_bytes(), self.content)
 
 
 class ConfigTests(unittest.TestCase):

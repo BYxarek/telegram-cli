@@ -9,7 +9,7 @@
 ![CLI](https://img.shields.io/badge/Interface-CLI-222222)
 [![GitHub stars](https://img.shields.io/github/stars/BYxarek/telegram-cli?style=flat)](https://github.com/BYxarek/telegram-cli/stargazers)
 
-**English** · [Русский](README.ru.md)
+**English** · [Русский](https://github.com/BYxarek/telegram-cli/blob/main/README.ru.md)
 
 [Features](#features) · [Installation](#installation) · [Quick start](#quick-start) · [Commands](#commands) · [AI agents](#ai-agents)
 
@@ -51,6 +51,29 @@ Message editing, deletion, and a full-screen interface are not available.
 ## Installation
 
 Requires **Python 3.10+**, pip, and access to Telegram.
+The package is prepared for PyPI; until the first release is published, use the GitHub installation below.
+
+### Published package and updates
+
+After the first PyPI release, install the isolated CLI and its user skills:
+
+```console
+pipx install telegram-cli-local
+tcli skills install
+tcli --version
+```
+
+Update the CLI, then refresh the bundled skills:
+
+```console
+pipx upgrade telegram-cli-local
+tcli skills install
+```
+
+For an existing Python virtual environment, use `python -m pip install --upgrade telegram-cli-local` instead.
+Install pipx using its [official instructions](https://pipx.pypa.io/stable/installation/).
+GitHub source installations are also supported:
+
 Clone the repository, or download and extract **Code → Download ZIP** on GitHub:
 
 ```console
@@ -164,6 +187,8 @@ Unknown commands and invalid arguments still return an error.
 | `tcli logout` | Revoke this CLI session, keeping API credentials |
 | `tcli help [COMMAND]` | Show general or command-specific help |
 | `tcli doctor [--connect]` | Check local configuration/session; optionally test connectivity and authorization |
+| `tcli skills install [--agent all\|codex\|claude]` | Install/update bundled user skills without Telegram access |
+| `tcli --version` | Show the installed CLI version |
 
 ### JSON, search, pagination, and replies
 
@@ -273,12 +298,26 @@ Outgoing message text may be saved in your shell history.
 
 | Agent | Skill | Invocation |
 | --- | --- | --- |
-| Codex | [.agents/skills/telegram-cli/SKILL.md](.agents/skills/telegram-cli/SKILL.md) | `$telegram-cli` |
-| Claude Code | [.claude/skills/telegram-cli/SKILL.md](.claude/skills/telegram-cli/SKILL.md) | `/telegram-cli` |
+| Codex | [.agents/skills/telegram-cli/SKILL.md](https://github.com/BYxarek/telegram-cli/blob/main/.agents/skills/telegram-cli/SKILL.md) | `$telegram-cli` |
+| Claude Code | [.claude/skills/telegram-cli/SKILL.md](https://github.com/BYxarek/telegram-cli/blob/main/.claude/skills/telegram-cli/SKILL.md) | `/telegram-cli` |
+
+`tcli skills install` installs the skill bundled with your CLI into
+`~/.agents/skills/telegram-cli/SKILL.md` (Codex) and `~/.claude/skills/telegram-cli/SKILL.md` (Claude Code).
+Use `--agent codex` or `--agent claude` to select one. This command works offline without API credentials
+or a Telegram session, and does not install either agent application.
+An identical file is skipped; a differing file is backed up as `SKILL.md.backup-*.bak` in the same folder
+before atomic replacement. Other files stay in place. Merge personal instructions from the backup manually.
+Symlinked skills are not replaced; update their source instead.
+Restart your agent or start a new session if the updated skill does not appear.
+
+For a cloned checkout, `git pull --ff-only` updates project-local skills and editable CLI source.
+Run `python -m pip install -e .` again to refresh package metadata and dependencies, then `tcli skills install` if you also
+installed user copies. Avoid duplicate project/user skills unless you need both scopes.
 
 Open your agent in the project root. Start a new session if the skill is not visible.
 Each skill contains the complete command, setup, and architecture reference in its own `SKILL.md`.
-Project instructions are in [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md).
+Project instructions are in [AGENTS.md](https://github.com/BYxarek/telegram-cli/blob/main/AGENTS.md)
+and [CLAUDE.md](https://github.com/BYxarek/telegram-cli/blob/main/CLAUDE.md).
 
 Example request:
 
@@ -321,7 +360,8 @@ tests/                Tests without a live account
 README.ru.md          Russian documentation
 ```
 
-Keep both READMEs and both SKILL.md files in sync when changing commands.
+Keep both READMEs and all three SKILL.md copies (Codex, Claude Code, and `tcli_skills/`) in sync when changing commands.
+Release instructions are in [RELEASING.md](https://github.com/BYxarek/telegram-cli/blob/main/RELEASING.md).
 [Report bugs](https://github.com/BYxarek/telegram-cli/issues) with the command, Python version,
 and sanitized error output. Never attach your session file or credentials.
 
@@ -344,3 +384,7 @@ After a connection failure, check recent history before retrying a send to avoid
 
 **Can I still run the Python file?** Yes: `python tg.py ...` from the project root
 with dependencies installed uses the same commands.
+
+## License
+
+Copyright 2026 BYxarek. Licensed under [Apache-2.0](https://github.com/BYxarek/telegram-cli/blob/main/LICENSE).

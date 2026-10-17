@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 from getpass import getpass
+from importlib.resources import files
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import unicodedata
 
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, RPCError
+from tcli_skills import __version__
 
 
 def positive_int(value):
@@ -40,7 +42,13 @@ Examples:
 Use me, @username, an exact chat name, or a chat ID.
 For negative IDs, put -- before the ID: tcli read -- -1001234567890
 Help works without configuration or a Telegram login.''')
+    cli.add_argument("--version", action="version", version=__version__)
     commands = cli.add_subparsers(dest="command", title="commands", metavar="COMMAND")
+    skills = commands.add_parser("skills", help="Install or update bundled agent skills without Telegram access")
+    skill_commands = skills.add_subparsers(dest="skills_command", required=True)
+    install = skill_commands.add_parser("install", help="Install or update user skills, backing up changed files")
+    install.add_argument("--agent", choices=("all", "codex", "claude"), default="all",
+                         help="agent to install for (default: all)")
     commands.add_parser("config", help="Save API credentials locally",
                         description="Save or replace API_ID and API_HASH. No Telegram connection required.")
     commands.add_parser("login", help="Sign in to your personal account",
@@ -113,21 +121,50 @@ def configure(path):
     api_hash = getpass("API_HASH (hidden input): ").strip()
     api_id, api_hash = validate_credentials(api_id, api_hash)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    atomic_write(path, (json.dumps({"api_id": api_id, "api_hash": api_hash}, indent=2) + "\n").encode("utf-8"))
+    print(f"Configuration saved: {path}")
+    if "TG_API_ID" in os.environ or "TG_API_HASH" in os.environ:
+        print("Note: TG_API_ID and TG_API_HASH environment variables override the configuration file.")
+
+
+def atomic_write(path, content):
     temporary = None
     try:
-        # Replace only a complete file, so interrupted writes preserve existing settings.
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
-                                         prefix=".config-", suffix=".tmp", delete=False) as stream:
+        # Replace only a complete file, so interrupted writes preserve the original.
+        with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent,
+                                         prefix=f".{path.stem}-", suffix=".tmp", delete=False) as stream:
             temporary = Path(stream.name)
-            json.dump({"api_id": api_id, "api_hash": api_hash}, stream, indent=2)
-            stream.write("\n")
+            stream.write(content)
         temporary.replace(path)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-    print(f"Configuration saved: {path}")
-    if "TG_API_ID" in os.environ or "TG_API_HASH" in os.environ:
-        print("Note: TG_API_ID and TG_API_HASH environment variables override the configuration file.")
+
+
+def install_skills(agent):
+    content = files("tcli_skills").joinpath("SKILL.md").read_bytes()
+    home = Path.home()
+    targets = {"codex": home / ".agents" / "skills", "claude": home / ".claude" / "skills"}
+    for name, root in targets.items():
+        if agent != "all" and agent != name:
+            continue
+        folder = root / "telegram-cli"
+        path = folder / "SKILL.md"
+        if folder.is_symlink() or path.is_symlink():
+            raise ValueError(f"Skill is symlinked; update its source instead: {path}")
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if path.exists():
+            previous = path.read_bytes()
+            if previous == content:
+                print(f"Skill already up to date ({name}): {path}")
+                continue
+            with tempfile.NamedTemporaryFile(mode="wb", dir=folder, prefix="SKILL.md.backup-",
+                                             suffix=".bak", delete=False) as backup:
+                backup.write(previous)
+            print(f"Previous skill backed up: {backup.name}")
+        atomic_write(path, content)
+        print(f"Skill installed ({name}): {path}")
+    print("If the updated skill does not appear, restart your agent or start a new session.")
 
 
 def safe_text(value):
@@ -254,6 +291,9 @@ def main():
         cli.print_help()
         return 0
     try:
+        if args.command == "skills":
+            install_skills(args.agent)
+            return 0
         session_dir = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "share") / "telegram-cli"
         config_path = session_dir / "config.json"
         if args.command == "config":

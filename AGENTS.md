@@ -6,6 +6,8 @@ The skill contains the complete command and architecture reference.
 
 Offline validation: `.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v`.
 Development and tests do not require a live account or sending real messages.
+Keep the two repository skills and `tcli_skills/SKILL.md` identical when changing commands.
+Package version: `tcli_skills/__init__.py`. Release and wheel checks: `RELEASING.md`.
 Never store API secrets, login codes, passwords, or session files in source or documentation.
 Use English for CLI output and developer instructions. Maintain `README.md` in English and `README.ru.md` in Russian.
 Respond in the user's requested language; English CLI output does not require English conversation replies.

@@ -5,3 +5,4 @@ Use `.claude/skills/telegram-cli/SKILL.md` for commands, diagnostics, and develo
 The skill contains the complete project reference; also follow `AGENTS.md`.
 Do not send live messages as part of code validation.
 Keep CLI output and developer instructions in English; maintain both English and Russian READMEs.
+Keep both repository skills and `tcli_skills/SKILL.md` identical. See `RELEASING.md` for package checks.

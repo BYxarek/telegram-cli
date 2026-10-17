@@ -1,0 +1,8 @@
+include README.ru.md
+include RELEASING.md
+include AGENTS.md
+include CLAUDE.md
+include .agents/skills/telegram-cli/SKILL.md
+include .claude/skills/telegram-cli/SKILL.md
+recursive-include tests *.py
+recursive-include scripts *.py

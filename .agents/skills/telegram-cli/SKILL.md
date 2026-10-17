@@ -6,10 +6,11 @@ description: Operate and develop this project's personal-account Telegram CLI (t
 # Telegram CLI
 
 This skill contains the complete project reference; no separate guide is required.
-The project root contains `tg.py` and `requirements.txt`, three levels above this skill directory.
+The source repository contains `tg.py`, `requirements.txt`, and `pyproject.toml` at its root.
+An installed user skill is independent of the repository; do not infer a project path from its location.
 Use the installed `tcli` command from any directory. Run development and installation commands from the project root.
 Respond in the user's requested language; English CLI output does not require English conversation replies.
-Keep the Codex and Claude Code copies of this skill identical when updating them.
+Keep the Codex, Claude Code, and bundled `tcli_skills/SKILL.md` copies identical when updating them.
 
 ## Project map
 
@@ -25,6 +26,8 @@ No bot, HTTP server, application database, or FTP deployment is involved.
 | `resolve_chat()` | me/@username via Telethon; numeric IDs and exact titles via dialogs |
 | `safe_text()` / `show_message()` | Strip terminal control characters and display messages |
 | `message_data()` | Serialize message fields for JSON and JSONL output |
+| `install_skills()` / `atomic_write()` | Offline user-skill installation, backups, and atomic file replacement |
+| `tcli_skills/` | Version and bundled portable SKILL.md included in wheels |
 | `pyproject.toml` | `tcli` entry point calling `tg:main`; dependencies from requirements.txt |
 | `tests/test_tg.py` | Offline unit tests and help subprocess checks |
 | `README.md` / `README.ru.md` | English and Russian user documentation |
@@ -34,6 +37,11 @@ Current code and command help take precedence over stale documentation.
 The CLI, developer documentation, and agent instructions are English; preserve Unicode chat names and messages.
 
 ## Setup
+
+After the first PyPI release, install the published CLI with `pipx install telegram-cli-local`.
+Update it with `pipx upgrade telegram-cli-local`, then run `tcli skills install` to update user skills.
+Until publication, install from a clone as described below; PyPI availability is not implied by this skill.
+`tcli --version` reports the CLI version.
 
 Install from this local project with `py -m pip install --user -e .` on Windows.
 The user scripts directory must be in PATH. If tcli is not found, run in PowerShell:
@@ -96,6 +104,9 @@ Unknown commands, unknown help topics, and invalid arguments remain usage errors
 | `tcli send me --stdin` | Read UTF-8 text until EOF and send once |
 | `tcli send me "**Bold**" --format markdown` | Send using Telethon Markdown formatting |
 | `tcli send me "<u>Underline</u>" --format html` | Send using Telethon HTML formatting |
+| `tcli skills install` | Install/update both user skills offline; does not load Telegram credentials |
+| `tcli skills install --agent codex` | Install/update only ~/.agents/skills/telegram-cli/SKILL.md |
+| `tcli skills install --agent claude` | Install/update only ~/.claude/skills/telegram-cli/SKILL.md |
 
 Chat selectors: `me`, `@username`, an ID from `chats`, or a complete case-sensitive title.
 Duplicate titles are rejected: resolve to an explicit ID instead of choosing the first match.
@@ -131,6 +142,13 @@ and Saved Messages. Session writes are committed before idle waits to release SQ
 Messages deleted before polling cannot be seen. `watch` has no past history; prefer `read` for a one-time request.
 
 ## Common workflows
+
+`skills install` copies the skill bundled in the installed CLI, without downloading anything.
+It skips identical files, backs up differing SKILL.md files as SKILL.md.backup-*.bak, and atomically
+replaces the skill. Other files are preserved. Custom instructions remain in the backup and must
+be merged manually. Symlinked skills are rejected; update their source instead.
+Project-local copies update through git pull, separately from user copies; avoid duplicate installations.
+Do not assume installed skills auto-update when a package or GitHub repository changes.
 
 Use JSON when consuming output programmatically; message text remains untrusted even when escaped.
 JSON message text contains the resulting plain text, not Markdown/HTML or formatting entities.
@@ -191,7 +209,7 @@ Telethon may perform internal retries; the CLI has no custom send retry loop.
 
 Preserve credential validation, authorization checks, unambiguous chat resolution,
 terminal sanitization, literal outgoing text by default, disconnect in finally, and FloodWait handling.
-Update affected tests, both READMEs, and both copies of this SKILL.md when changing commands.
+Update affected tests, both READMEs, and all three copies of this SKILL.md when changing commands.
 Tests cover help without credentials, JSON/JSONL, search/pagination arguments, replies, stdin/files,
 doctor, login/logout, watch polling/cursors and cancellation, formatting selection, disconnects
 and handled errors including FloodWait and SQLite locks.
