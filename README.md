@@ -210,7 +210,8 @@ Outgoing message text may be saved in your shell history.
 | Claude Code | [.claude/skills/telegram-cli/SKILL.md](.claude/skills/telegram-cli/SKILL.md) | `/telegram-cli` |
 
 Open your agent in the project root. Start a new session if the skill is not visible.
-See [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md), and the [agent guide](docs/agent-guide.md).
+Each skill contains the complete command, setup, and architecture reference in its own `SKILL.md`.
+Project instructions are in [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md).
 
 Example request:
 
@@ -247,13 +248,12 @@ tg.py                 CLI commands, configuration, and Telegram operations
 pyproject.toml        Package metadata and tcli entry point
 requirements.txt      Dependencies
 tests/                Tests without a live account
-docs/agent-guide.md   Agent reference
-.agents/skills/       Codex skill
-.claude/skills/       Claude Code skill
+.agents/skills/       Self-contained Codex skill and project reference
+.claude/skills/       Self-contained Claude Code skill and project reference
 README.ru.md          Russian documentation
 ```
 
-Keep both READMEs and the agent guide in sync when changing commands.
+Keep both READMEs and both SKILL.md files in sync when changing commands.
 [Report bugs](https://github.com/BYxarek/telegram-cli/issues) with the command, Python version,
 and sanitized error output. Never attach your session file or credentials.
 

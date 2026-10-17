@@ -200,8 +200,8 @@ ID здесь приведён для примера — используйте 
 | Claude Code | [.claude/skills/telegram-cli/SKILL.md](.claude/skills/telegram-cli/SKILL.md) | `/telegram-cli` |
 
 Откройте агента в корне проекта. Если навык не виден в текущей сессии, начните новую.
-Общий контекст описан в [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md)
-и [справочнике для агентов](docs/agent-guide.md).
+Каждый `SKILL.md` содержит полное описание команд, настройки и устройства проекта.
+Общие инструкции находятся в [AGENTS.md](AGENTS.md) и [CLAUDE.md](CLAUDE.md).
 
 Пример поручения:
 
@@ -238,12 +238,11 @@ tg.py                 Команды, авторизация, настройки
 pyproject.toml        Метаданные пакета и точка входа tcli
 requirements.txt      Зависимости
 tests/                Проверки без реального аккаунта
-docs/agent-guide.md   Справочник для ИИ-агентов
-.agents/skills/       Навык Codex
-.claude/skills/       Навык Claude Code
+.agents/skills/       Самодостаточный навык Codex со справочником проекта
+.claude/skills/       Самодостаточный навык Claude Code со справочником проекта
 ```
 
-При изменении команд обновляйте тесты, оба README и справочник для агентов.
+При изменении команд обновляйте тесты, оба README и оба файла SKILL.md.
 Для сообщения об ошибке [создайте issue](https://github.com/BYxarek/telegram-cli/issues)
 и приложите команду, версию Python и текст ошибки, удалив персональные данные.
 Не прикладывайте файл сессии или конфигурацию с секретами.
