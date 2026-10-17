@@ -104,7 +104,7 @@ Unknown commands, unknown help topics, and invalid arguments remain usage errors
 | `tcli send me --stdin` | Read UTF-8 text until EOF and send once |
 | `tcli send me "**Bold**" --format markdown` | Send using Telethon Markdown formatting |
 | `tcli send me "<u>Underline</u>" --format html` | Send using Telethon HTML formatting |
-| `tcli skills install` | Install/update both user skills offline; does not load Telegram credentials |
+| `tcli skills install` | Detect installed agents and install/update their user skills offline |
 | `tcli skills install --agent codex` | Install/update only ~/.agents/skills/telegram-cli/SKILL.md |
 | `tcli skills install --agent claude` | Install/update only ~/.claude/skills/telegram-cli/SKILL.md |
 
@@ -143,7 +143,11 @@ Messages deleted before polling cannot be seen. `watch` has no past history; pre
 
 ## Common workflows
 
-`skills install` copies the skill bundled in the installed CLI, without downloading anything.
+`skills install` defaults to --agent auto: detect installed agents and copy the bundled skill only for those agents.
+Detection checks PATH, native ~/.local/bin executables, standard npm/binary locations, Codex.app on macOS,
+and the OpenAI.Codex Windows Store installation. Configuration folders alone are not installation evidence.
+If neither agent is found, it creates nothing. Explicit --agent codex|claude|all bypasses detection for custom installations.
+The installer never downloads anything or launches either agent.
 It skips identical files, backs up differing SKILL.md files as SKILL.md.backup-*.bak, and atomically
 replaces the skill. Other files are preserved. Custom instructions remain in the backup and must
 be merged manually. Symlinked skills are rejected; update their source instead.

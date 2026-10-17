@@ -91,7 +91,7 @@ class SkillsTests(unittest.TestCase):
     def test_install_both_is_offline_and_idempotent(self):
         with patch.dict(os.environ, {}, clear=True), patch("sys.argv", ["tcli", "skills", "install"]), \
                 patch("tg.sys.stdout.reconfigure"), patch("tg.sys.stderr.reconfigure"), \
-                patch("tg.TelegramClient") as client:
+                patch("tg.TelegramClient") as client, patch("tg.agent_installed", return_value=True):
             self.assertEqual(tg.main(), 0)
             client.assert_not_called()
         tg.install_skills("all")
@@ -99,6 +99,69 @@ class SkillsTests(unittest.TestCase):
             path = self.path(agent)
             self.assertEqual(path.read_bytes(), self.content)
             self.assertEqual(list(path.parent.iterdir()), [path])
+
+    def test_auto_creates_nothing_without_agents(self):
+        self.assertEqual(tg.parser().parse_args(["skills", "install"]).agent, "auto")
+        with patch("tg.agent_installed", return_value=False):
+            tg.install_skills("auto")
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_auto_installs_only_detected_agent(self):
+        for detected in ("codex", "claude"):
+            with self.subTest(agent=detected), TemporaryDirectory() as directory:
+                home = Path(directory)
+                with patch("tg.Path.home", return_value=home), \
+                        patch("tg.agent_installed", side_effect=lambda name: name == detected):
+                    tg.install_skills("auto")
+                self.assertEqual((home / (".agents" if detected == "codex" else ".claude") /
+                                  "skills" / "telegram-cli" / "SKILL.md").read_bytes(), self.content)
+                self.assertFalse((home / (".claude" if detected == "codex" else ".agents")).exists())
+
+    def test_explicit_agent_does_not_require_detection(self):
+        with patch("tg.agent_installed", return_value=False) as detect:
+            tg.install_skills("all")
+            detect.assert_not_called()
+        self.assertTrue(self.path("codex").exists())
+        self.assertTrue(self.path("claude").exists())
+
+    def test_detect_path_command(self):
+        with patch("tg.shutil.which", return_value="executable"):
+            self.assertTrue(tg.agent_installed("claude"))
+
+    def test_detect_native_install_outside_path(self):
+        suffix = ".exe" if sys.platform == "win32" else ""
+        executable = self.home / ".local" / "bin" / ("claude" + suffix)
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"test")
+        executable.chmod(0o700)
+        with patch("tg.shutil.which", return_value=None):
+            self.assertTrue(tg.agent_installed("claude"))
+
+    def test_config_directories_are_not_installations(self):
+        for name in (".codex", ".claude", ".agents"):
+            (self.home / name).mkdir()
+        with patch("tg.shutil.which", return_value=None), patch("tg.Path.is_file", return_value=False), \
+                patch("tg.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout="")):
+            self.assertFalse(tg.agent_installed("codex"))
+            self.assertFalse(tg.agent_installed("claude"))
+
+    def test_detect_windows_store_codex_and_query_failure(self):
+        with patch("tg.sys.platform", "win32"), patch("tg.shutil.which", return_value=None), \
+                patch("tg.Path.is_file", return_value=False), patch("tg.subprocess.run") as query:
+            query.return_value = SimpleNamespace(returncode=0, stdout="OpenAI.Codex\n")
+            self.assertTrue(tg.agent_installed("codex"))
+            self.assertEqual(query.call_args.kwargs["timeout"], 5)
+            query.return_value = SimpleNamespace(returncode=0, stdout="")
+            self.assertFalse(tg.agent_installed("codex"))
+            query.side_effect = subprocess.TimeoutExpired("powershell", 5)
+            self.assertFalse(tg.agent_installed("codex"))
+
+    def test_detect_mac_codex_app(self):
+        executable = self.home / "Applications" / "Codex.app" / "Contents" / "MacOS" / "Codex"
+        executable.parent.mkdir(parents=True)
+        executable.write_bytes(b"test")
+        with patch("tg.sys.platform", "darwin"), patch("tg.shutil.which", return_value=None):
+            self.assertTrue(tg.agent_installed("codex"))
 
     def test_update_backs_up_custom_text_and_preserves_other_files(self):
         path = self.path("codex")

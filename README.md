@@ -187,7 +187,7 @@ Unknown commands and invalid arguments still return an error.
 | `tcli logout` | Revoke this CLI session, keeping API credentials |
 | `tcli help [COMMAND]` | Show general or command-specific help |
 | `tcli doctor [--connect]` | Check local configuration/session; optionally test connectivity and authorization |
-| `tcli skills install [--agent all\|codex\|claude]` | Install/update bundled user skills without Telegram access |
+| `tcli skills install [--agent auto\|all\|codex\|claude]` | Install/update bundled user skills without Telegram access |
 | `tcli --version` | Show the installed CLI version |
 
 ### JSON, search, pagination, and replies
@@ -301,9 +301,12 @@ Outgoing message text may be saved in your shell history.
 | Codex | [.agents/skills/telegram-cli/SKILL.md](https://github.com/BYxarek/telegram-cli/blob/main/.agents/skills/telegram-cli/SKILL.md) | `$telegram-cli` |
 | Claude Code | [.claude/skills/telegram-cli/SKILL.md](https://github.com/BYxarek/telegram-cli/blob/main/.claude/skills/telegram-cli/SKILL.md) | `/telegram-cli` |
 
-`tcli skills install` installs the skill bundled with your CLI into
+`tcli skills install` detects installed agents and installs the bundled skill only for those agents into
 `~/.agents/skills/telegram-cli/SKILL.md` (Codex) and `~/.claude/skills/telegram-cli/SKILL.md` (Claude Code).
-Use `--agent codex` or `--agent claude` to select one. This command works offline without API credentials
+The default `--agent auto` checks PATH, native `~/.local/bin` executables, standard npm/binary locations,
+Codex.app on macOS, and the Windows Store Codex installation. Configuration folders alone do not count.
+If no agent is detected, no skill folders are created. Explicit `--agent codex`, `--agent claude`, or
+`--agent all` bypasses detection for custom installations. This command works offline without API credentials
 or a Telegram session, and does not install either agent application.
 An identical file is skipped; a differing file is backed up as `SKILL.md.backup-*.bak` in the same folder
 before atomic replacement. Other files stay in place. Merge personal instructions from the backup manually.

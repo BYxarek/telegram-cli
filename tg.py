@@ -8,7 +8,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unicodedata
@@ -47,8 +49,8 @@ Help works without configuration or a Telegram login.''')
     skills = commands.add_parser("skills", help="Install or update bundled agent skills without Telegram access")
     skill_commands = skills.add_subparsers(dest="skills_command", required=True)
     install = skill_commands.add_parser("install", help="Install or update user skills, backing up changed files")
-    install.add_argument("--agent", choices=("all", "codex", "claude"), default="all",
-                         help="agent to install for (default: all)")
+    install.add_argument("--agent", choices=("auto", "all", "codex", "claude"), default="auto",
+                         help="default: auto detects installed agents; explicit choices skip detection")
     commands.add_parser("config", help="Save API credentials locally",
                         description="Save or replace API_ID and API_HASH. No Telegram connection required.")
     commands.add_parser("login", help="Sign in to your personal account",
@@ -141,12 +143,47 @@ def atomic_write(path, content):
             temporary.unlink(missing_ok=True)
 
 
+def agent_installed(name):
+    if shutil.which(name):
+        return True
+    home = Path.home()
+    suffix = ".exe" if sys.platform == "win32" else ""
+    candidates = [home / ".local" / "bin" / (name + suffix)]
+    if sys.platform == "win32":
+        candidates.append(Path(os.environ.get("APPDATA", home / "AppData" / "Roaming")) / "npm" / (name + ".cmd"))
+    else:
+        candidates.extend(Path(root) / name for root in ("/usr/local/bin", "/usr/bin", "/opt/homebrew/bin"))
+    if any(path.is_file() and os.access(path, os.X_OK) for path in candidates):
+        return True
+    if name == "codex" and sys.platform == "darwin":
+        return any((root / "Codex.app" / "Contents" / "MacOS" / "Codex").is_file()
+                   for root in (Path("/Applications"), home / "Applications"))
+    if name == "codex" and sys.platform == "win32":
+        powershell = Path(os.environ.get("SYSTEMROOT", "C:/Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+        try:
+            result = subprocess.run(
+                [str(powershell), "-NoProfile", "-NonInteractive", "-Command",
+                 "Get-AppxPackage -Name OpenAI.Codex | Select-Object -ExpandProperty Name"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return result.returncode == 0 and result.stdout.strip() == "OpenAI.Codex"
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+    return False
+
+
 def install_skills(agent):
     content = files("tcli_skills").joinpath("SKILL.md").read_bytes()
     home = Path.home()
     targets = {"codex": home / ".agents" / "skills", "claude": home / ".claude" / "skills"}
+    if agent == "auto":
+        targets = {name: root for name, root in targets.items() if agent_installed(name)}
+        if not targets:
+            print("No supported agent installations found. Nothing installed. "
+                  "For a custom installation, use --agent codex or --agent claude.")
+            return
     for name, root in targets.items():
-        if agent != "all" and agent != name:
+        if agent not in ("auto", "all", name):
             continue
         folder = root / "telegram-cli"
         path = folder / "SKILL.md"
