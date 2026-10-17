@@ -259,6 +259,13 @@ and sanitized error output. Never attach your session file or credentials.
 
 ## Troubleshooting
 
+**`Could not find platform independent libraries <prefix>` on startup?**
+This warning comes from Python before the CLI starts. Check `py -c "import sys; print(sys.executable); print(sys.prefix)"`
+on Windows. Repair or reinstall that Python installation so its standard library and extension modules
+are present alongside the interpreter; avoid moving `python.exe` on its own.
+Then reinstall the CLI using that interpreter. If a virtual environment points to a removed installation,
+recreate it and reinstall the project. Do not hide stderr: it also contains real CLI errors.
+
 **Chat not found?** Use an exact name, `@username`, or an ID from `tcli chats`.
 Increase `--limit` if your chat is not in the first page.
 

@@ -109,6 +109,8 @@ Missing authorization: suggest local `tcli login`.
 FloodWait: wait the reported duration; do not bypass limits or retry immediately.
 RPC/network errors: address the specific cause; a send may have an uncertain outcome.
 SQLite locking: investigate other CLI processes; do not delete the session file.
+`Could not find platform independent libraries <prefix>`: Python installation/path warning before application startup.
+Inspect the interpreter and its standard library; repair the installation rather than suppressing stderr or changing Telegram code.
 Exit codes: 0 success, 1 handled error, 2 argparse usage error, 130 Ctrl+C.
 Telethon may perform internal retries; the CLI has no custom send retry loop.
 
