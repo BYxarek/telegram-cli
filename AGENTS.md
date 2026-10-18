@@ -1,8 +1,8 @@
 # Telegram CLI
 
 Local Python CLI for a personal Telegram account, using Telethon. Entry point: `tg.py`.
-Use `.agents/skills/telegram-cli/SKILL.md` for CLI operation and implementation tasks.
-The skill contains the complete command and architecture reference.
+Use `.agents/skills/telegram-cli/SKILL.md` for CLI usage, commands, and operational constraints.
+Keep architecture and development instructions in repository documentation, not in the skill.
 
 Offline validation: `.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v`.
 Development and tests do not require a live account or sending real messages.

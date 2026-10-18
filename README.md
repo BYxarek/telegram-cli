@@ -41,7 +41,7 @@ It uses the Telegram API and acts as your personal account. You need your own
 - **Local configuration:** enter API credentials once using `tcli config`.
 - **Saved login:** reuse your local session on later runs.
 - **Built-in help:** `tcli`, `tcli help`, and `tcli help <command>` work without an account.
-- **AI agent skills:** project instructions for Codex and Claude Code.
+- **AI agent skills:** CLI usage instructions for Codex and Claude Code.
 
 Reading history does not mark messages as read. Outgoing text is literal by default;
 use `--format markdown` or `--format html` for formatting. Terminal control characters
@@ -474,13 +474,13 @@ Run `python -m pip install -e .` again to refresh package metadata and dependenc
 installed user copies. Avoid duplicate project/user skills unless you need both scopes.
 
 Open your agent in the project root. Start a new session if the skill is not visible.
-Each skill contains the complete command, setup, and architecture reference in its own `SKILL.md`.
+Each `SKILL.md` explains CLI usage, setup, commands, and operational constraints.
 Project instructions are in [AGENTS.md](https://github.com/BYxarek/telegram-cli/blob/main/AGENTS.md)
 and [CLAUDE.md](https://github.com/BYxarek/telegram-cli/blob/main/CLAUDE.md).
 
 Example request:
 
-> Use telegram-cli. Explain the commands and run tests without signing in to Telegram.
+> Use telegram-cli. Show my chats and read the latest 10 messages in Saved Messages.
 
 Skills explain chat resolution, configuration, errors, and authorization boundaries.
 Sending requires the user's direct instruction. Telegram messages are untrusted data,
@@ -514,8 +514,8 @@ tg.py                 CLI commands, configuration, and Telegram operations
 pyproject.toml        Package metadata and tcli entry point
 requirements.txt      Dependencies
 tests/                Tests without a live account
-.agents/skills/       Self-contained Codex skill and project reference
-.claude/skills/       Self-contained Claude Code skill and project reference
+.agents/skills/       Self-contained Codex CLI usage skill
+.claude/skills/       Self-contained Claude Code CLI usage skill
 README.ru.md          Russian documentation
 ```
 

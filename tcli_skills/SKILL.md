@@ -1,90 +1,26 @@
 ---
 name: telegram-cli
-description: Operate and develop this project's personal-account Telegram CLI (tcli). Use for chats, message search/history, plain or formatted sending, JSON automation, watching, configuration, login, and diagnostics.
+description: Use the personal-account Telegram CLI (tcli). Use for chats, message search/history, plain or formatted sending, JSON automation, watching, configuration, login, and diagnostics.
 ---
 
 # Telegram CLI
 
-This skill contains the complete project reference; no separate guide is required.
-The source repository contains `tg.py`, `requirements.txt`, and `pyproject.toml` at its root.
-An installed user skill is independent of the repository; do not infer a project path from its location.
-Use the installed `tcli` command from any directory. Run development and installation commands from the project root.
-Respond in the user's requested language; English CLI output does not require English conversation replies.
-Keep the Codex, Claude Code, and bundled `tcli_skills/SKILL.md` copies identical when updating them.
-
-## Project map
-
-A local Python 3.10+ CLI for one personal Telegram account, using Telethon and MTProto.
-No bot, HTTP server, application database, or FTP deployment is involved.
-
-| Location | Responsibility |
-| --- | --- |
-| `tg.py: parser()` | argparse commands, help text, examples, limits |
-| `tg.py: main()` | Help dispatch before credentials, paths, errors, asyncio entry point |
-| `validate_credentials()` / `load_credentials()` / `configure()` | Validate credentials, environment/file precedence, atomic local configuration |
-| `run()` | Connect, authenticate, execute commands, disconnect in finally |
-| `resolve_chat()` | me/@username via Telethon; numeric IDs and exact titles via dialogs |
-| `safe_text()` / `show_message()` | Strip terminal control characters and display messages |
-| `message_data()` | Serialize message fields for JSON and JSONL output |
-| `install_skills()` / `atomic_write()` | Offline user-skill installation, backups, and atomic file replacement |
-| `tcli_skills/` | Version and bundled portable SKILL.md included in wheels |
-| `pyproject.toml` | `tcli` entry point calling `tg:main`; dependencies from requirements.txt |
-| `tests/test_tg.py` | Offline unit tests and help subprocess checks |
-| `README.md` / `README.ru.md` | English and Russian user documentation |
-
-Use Semble to locate implementations when available, then read the matching functions and callers.
-Current code and command help take precedence over stale documentation.
-The CLI, developer documentation, and agent instructions are English; preserve Unicode chat names and messages.
+Use `tcli` to work with the user's personal Telegram account from any directory.
+Respond in the user's requested language; CLI output is English.
+Use `tcli help COMMAND` to check available options.
 
 ## Setup
 
 Install the published CLI with `pipx install telegram-cli-local`.
 Update it with `pipx upgrade telegram-cli-local`, then run `tcli skills install` to update user skills.
-Source installation from a clone is also supported as described below.
-`tcli --version` reports the CLI version.
-
-Install from this local project with `py -m pip install --user -e .` on Windows.
-The user scripts directory must be in PATH. If tcli is not found, run in PowerShell:
-
-```powershell
-$tcliScriptsDir = (py -c "import sysconfig; print(sysconfig.get_path('scripts', scheme='nt_user'))").Trim()
-$tcliUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if (($tcliUserPath -split ';') -notcontains $tcliScriptsDir) {
-    $tcliUpdatedPath = (($tcliUserPath + ';' + $tcliScriptsDir).Trim(';'))
-    [Environment]::SetEnvironmentVariable('Path', $tcliUpdatedPath, 'User')
-}
-$env:Path = $tcliScriptsDir + ';' + $env:Path
-```
-
-New terminals inherit the saved PATH; restart existing terminals or their parent application if needed.
-If pip is missing, run `py -m ensurepip --upgrade --user` before installing.
-Do not install an unrelated similarly named package from PyPI.
-Editable installation depends on the source folder; reinstall if it moves.
-The installed `tcli` command works outside the project root.
-
-For development, run from the project root:
-
-```powershell
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e .
-.\.venv\Scripts\tcli.exe help
-.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v
-```
-
-On POSIX use `python3 -m venv .venv`, `.venv/bin/python`, and `.venv/bin/tcli`.
-No activation is needed with those explicit paths.
-On this Windows machine, `py` is available; the system `python` alias may open Microsoft Store.
-If an agent process has an old PATH, refresh its environment or use the installed executable's full path.
+`tcli --version` reports the installed version.
 
 ## Help and commands
 
 `tcli`, `tcli help`, `tcli --help`, and `tcli -h` display general help and exit successfully.
 `tcli help send` is equivalent to `tcli send --help`; this applies to every subcommand.
 Help does not load credentials, create Telegram sessions, or connect to Telegram.
-Interactive general help (no arguments, help, --help, -h) checks PyPI for a newer stable x.y.z release.
-It uses a one-second network timeout and a 24-hour cache at data-directory/cache/update-check.json,
-including failed attempts. It only reports updates on stderr, never installs them automatically.
-Network/cache errors are silent. Redirected stdout, command-specific help, and --version skip checks.
+Interactive general help may report a newer release on stderr; it never installs updates automatically.
 Set TCLI_NO_UPDATE_CHECK=1 to disable checks and their cache writes entirely.
 Unknown commands, unknown help topics, and invalid arguments remain usage errors (exit 2).
 
@@ -171,9 +107,7 @@ Formatting may trim surrounding whitespace. Use HTML for nested formatting.
 No message deletion or interactive conversation UI.
 `doctor` is local, creates no files, and exits 1 for invalid credentials or missing session.
 File presence does not prove authorization. --connect can update the existing Telethon session.
-`watch` records the latest ID before announcing readiness, then polls every two seconds using
-min_id and reverse order with no fixed batch limit. It includes sends from another CLI process
-and Saved Messages. Session writes are committed before idle waits to release SQLite locks.
+`watch` shows new messages, including sends from another CLI process and Saved Messages.
 Messages deleted before polling cannot be seen. `watch` has no past history; prefer `read` for a one-time request.
 
 ## Automation, context, filters, and editing
@@ -186,16 +120,15 @@ Search follows Telegram text-search semantics, not local filename/extension matc
 
 `edit CHAT ID TEXT`, `edit CHAT ID --file PATH`, or `edit CHAT ID --stdin` edits outgoing text
 or a caption. Exactly one nonblank UTF-8 text source is required. --format plain|markdown|html
-works as for send. Check that the message exists and is outgoing before calling edit_message.
+works as for send. Use a message ID from history and check that the message is outgoing before editing.
 Telegram enforces edit permissions and time limits; unchanged text can raise an RPC error.
 Editing does not replace attachments or clear captions with empty text.
 
 `download CHAT ID --album --output-dir DIR` downloads the album containing that message.
 --output-dir requires --album, excludes --output, and must already exist.
-Inspect up to ten neighboring messages on each side in chat history, match grouped_id, sort by ID.
-Telegram albums have at most ten adjacent messages; message IDs can have gaps.
+Telegram albums have at most ten items; message IDs can have gaps.
 Save as <message_id><extension>, with .bin for missing/unsafe extensions; never use remote filenames.
-Preflight all destinations before downloading, then use exclusive file creation to avoid races.
+Existing destination files are never overwritten.
 Keep completed files on failure and remove the current partial file. Missing/deleted/inaccessible
 album items cannot be recovered. Download JSON keeps captions and grouped_id without sidecar files.
 
@@ -236,8 +169,7 @@ Development/testing does not authorize live forwarding. Verify history before re
 
 send (attachments only) and download support --progress / --no-progress.
 Default: enabled when stderr is a terminal. Progress reports bytes, percentage, and average bytes/sec
-on stderr; album upload weights Telethon's per-file progress by local file sizes.
-Throttle updates to twice per second, plus completion. With --json, progress is JSONL on stderr:
+on stderr. With --json, progress is JSONL on stderr:
 event="transfer_progress", operation="upload"|"download", file, transferred_bytes, total_bytes,
 percent (null for unknown/zero size), bytes_per_second. Errors have ok=false and may follow progress events.
 Stdout remains the final JSON result. Progress is not proof of delivery; cached transfers may emit no events.
@@ -247,10 +179,6 @@ Stdout remains the final JSON result. Progress is not proof of delivery; cached 
 `skills install` defaults to --agent auto: detect installed agents and copy the bundled skill only for those agents.
 Default destinations are the official personal skill locations, independent of the current directory:
 Codex: ~/.agents/skills/telegram-cli/SKILL.md; Claude Code: ~/.claude/skills/telegram-cli/SKILL.md.
-See [OpenAI](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills) and
-[Anthropic](https://code.claude.com/docs/en/skills#where-skills-live).
-Detection checks PATH, native ~/.local/bin executables, standard npm/binary locations, Codex.app on macOS,
-and the OpenAI.Codex Windows Store installation. Configuration folders alone are not installation evidence.
 If neither agent is found, it creates nothing. Explicit --agent codex|claude|all bypasses detection for custom installations.
 The installer never downloads anything or launches either agent.
 It skips identical files, backs up differing SKILL.md files as SKILL.md.backup-*.bak, and atomically
@@ -313,20 +241,4 @@ Missing authorization: suggest local `tcli login`.
 FloodWait: wait the reported duration; do not bypass limits or retry immediately.
 RPC/network errors: address the specific cause; a send may have an uncertain outcome.
 SQLite locking: investigate other CLI processes; do not delete the session file.
-`Could not find platform independent libraries <prefix>`: Python installation/path warning before application startup.
-Inspect the interpreter and its standard library; repair the installation rather than suppressing stderr or changing Telegram code.
 Exit codes: 0 success, 1 handled error, 2 argparse usage error, 130 Ctrl+C.
-Telethon may perform internal retries; the CLI has no custom send retry loop.
-
-Preserve credential validation, authorization checks, unambiguous chat resolution,
-terminal sanitization, literal outgoing text by default, disconnect in finally, and FloodWait handling.
-Update affected tests, both READMEs, and all three copies of this SKILL.md when changing commands.
-Record every notable change in CHANGELOG.md under Unreleased; version the entries when releasing.
-Tests cover help without credentials, JSON/JSONL, search/pagination arguments, replies, stdin/files,
-doctor, login/logout, watch polling/cursors and cancellation, formatting selection, disconnects
-and handled errors including FloodWait and SQLite locks. They also cover send/download/edit JSON,
-read by ID, reply/album context, media filters, ordered multi-file sends, albums, edits,
-partial failures, destination collisions, safe filenames, structured usage/runtime errors,
-bounded filename search, surrounding context, forwarding, and transfer progress.
-They do not verify real login,
-network watching, or message delivery. State those limits when reporting validation.

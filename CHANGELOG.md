@@ -7,6 +7,12 @@ move them into a versioned section when publishing a release.
 
 No unreleased changes.
 
+## 0.2.1 - 2026-10-18
+
+### Changed
+
+- Focus the Telegram CLI skill on usage; remove project architecture and development instructions from all three copies.
+
 ## 0.2.0 - 2026-10-18
 
 ### Added
