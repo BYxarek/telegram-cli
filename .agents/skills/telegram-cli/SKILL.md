@@ -98,6 +98,15 @@ Unknown commands, unknown help topics, and invalid arguments remain usage errors
 | `tcli send me "Text"` | Send literal text to Saved Messages |
 | `tcli send @username "Text"` | Send to a username |
 | `tcli send -- -1001234567890 "Text"` | Send by negative ID |
+| `tcli send me --attach photo.jpg --caption "Photo"` | Upload a photo, video, audio, or any Telegram-supported local file |
+| `tcli send me --attach archive.zip --as-file` | Force document upload; preserve the original file |
+| `tcli download me 123 --output photo.jpg` | Download the attachment from message 123 into a new local file |
+| `tcli read "Chat" --id 123 --json` | Get one message with reply and album IDs |
+| `tcli read "Chat" --media document --json` | Filter media using Telegram search |
+| `tcli send me --attach app.apk archive.zip --caption "App" --caption "Archive" --json` | Send files individually in order |
+| `tcli send me --attach first.jpg second.jpg --album --json` | Send 2-10 compatible attachments as one album |
+| `tcli download me 123 --album --output-dir downloads --json` | Download the album containing message 123 |
+| `tcli edit me 123 "Corrected text" --json` | Edit outgoing message text or attachment caption |
 | `tcli watch "Chat name"` | New messages until Ctrl+C; blocks the process |
 | `tcli logout` | Revoke this CLI session and remove its session file; keep API credentials |
 | `tcli doctor` | Validate effective credentials and session-file presence locally; show paths, never secret values |
@@ -119,16 +128,37 @@ Increase `chats --limit` if necessary. Do not invent IDs. Partial names and t.me
 Limits must be positive integers. `read` does not mark messages as read.
 
 Message output: `[local date and time] sender ID or you (#message ID): text`.
-Missing text displays `[media or service message]`.
+Downloadable media displays its type, filename (if available), MIME type, and size in bytes, alongside any caption.
+Other messages without text display `[media or service message]`.
 Human-readable output removes control characters. Optional JSON preserves original text using escaped
 Unicode/control characters. Chat fields: id, name, unread_count. Message fields: id, chat_id,
-date (ISO 8601 with offset), sender_id (nullable), out, text (empty when absent), has_media.
+date (ISO 8601 with offset), sender_id (nullable), out, text (empty when absent), has_media, media, reply_to_id, grouped_id.
+reply_to_id and grouped_id are null when absent; human output also shows these IDs.
+Use read --id with reply_to_id to retrieve the original message of a reply.
+`media` is null for messages without a downloadable photo/document; otherwise it contains
+type (photo, video, audio, voice, video_note, gif, sticker, document), name, mime_type, size (bytes),
+ext, width, height, duration (seconds). Unavailable metadata fields are null.
+Link previews and other Telegram media may have has_media=true with media=null.
 `chats --json` and `read --json` output arrays, including [] for no results.
 `watch --json` outputs JSONL with status/errors only on stderr.
 `read --search QUERY` uses Telegram text search in the selected chat; each page is oldest first.
 `--before ID` is exclusive; use the smallest returned ID for the next page, also with search.
 `--before` and `--reply-to` require positive message IDs from the same chat.
-`send` requires exactly one nonempty source: positional text, --stdin, or --file PATH.
+`send` requires exactly one source: positional text, --stdin, --file PATH, or --attach PATH.
+Text sources must be nonempty. --attach uploads one or more existing local files per command,
+including binary documents such as .exe, .apk, .zip; attachments are never decoded as text.
+Telethon selects photo/video/audio/document representation; --as-file forces a document.
+--caption supplies optional text with --attach only; --as-file and --album also require --attach.
+Repeat --caption in attachment order; missing captions are empty. Use --caption "" to skip one.
+Without --album, files are sent individually in order. --album sends 2-10 compatible attachments
+as a group via Telethon; incompatible Telegram album combinations may produce RPC errors.
+A single caption belongs to the first attachment. All paths and caption counts are checked before connecting.
+Captions support --format and --reply-to. File type and size limits are enforced by Telegram.
+`download CHAT ID --output PATH` saves the attachment of one message in that chat.
+Use IDs from read/watch. The destination parent must exist; existing files are never overwritten.
+Remote filenames are metadata only and never select a local path. Failed/cancelled downloads remove
+the partial destination. Download photos are Telegram's stored version, not necessarily the original.
+To view the content, open the downloaded file with a local application; the CLI displays metadata.
 Stdin/files use UTF-8 with optional BOM; whitespace and line breaks are preserved, blank input rejected
 before connecting. PowerShell pipelines must emit UTF-8 (set $OutputEncoding if necessary).
 --file sends text, not an attachment. All sources support --reply-to ID and --format plain|markdown|html.
@@ -138,7 +168,7 @@ HTML supports b/strong, i/em, u, s/del, code, pre, a href, blockquote (including
 and pre/code class="language-python" for code-block language. Use actual newlines, not br tags.
 The installed Telethon parser ignores unsupported HTML tags and does not support spoiler markup.
 Formatting may trim surrounding whitespace. Use HTML for nested formatting.
-No attachments, editing, deletion, or interactive conversation UI.
+No message deletion or interactive conversation UI.
 `doctor` is local, creates no files, and exits 1 for invalid credentials or missing session.
 File presence does not prove authorization. --connect can update the existing Telethon session.
 `watch` records the latest ID before announcing readiness, then polls every two seconds using
@@ -146,9 +176,51 @@ min_id and reverse order with no fixed batch limit. It includes sends from anoth
 and Saved Messages. Session writes are committed before idle waits to release SQLite locks.
 Messages deleted before polling cannot be seen. `watch` has no past history; prefer `read` for a one-time request.
 
+## Automation, context, filters, and editing
+
+`read CHAT --id ID` fetches one message or fails with message_not_found. JSON remains an array
+with one item. --id cannot combine with --before, --search, or --media; --limit applies only to history.
+`read --media photo|video|document|audio|voice|video_note|gif` uses native Telegram filters;
+audio means music. Filters combine with --search, --before, and --limit.
+Search follows Telegram text-search semantics, not local filename/extension matching.
+
+`edit CHAT ID TEXT`, `edit CHAT ID --file PATH`, or `edit CHAT ID --stdin` edits outgoing text
+or a caption. Exactly one nonblank UTF-8 text source is required. --format plain|markdown|html
+works as for send. Check that the message exists and is outgoing before calling edit_message.
+Telegram enforces edit permissions and time limits; unchanged text can raise an RPC error.
+Editing does not replace attachments or clear captions with empty text.
+
+`download CHAT ID --album --output-dir DIR` downloads the album containing that message.
+--output-dir requires --album, excludes --output, and must already exist.
+Inspect up to ten neighboring messages on each side in chat history, match grouped_id, sort by ID.
+Telegram albums have at most ten adjacent messages; message IDs can have gaps.
+Save as <message_id><extension>, with .bin for missing/unsafe extensions; never use remote filenames.
+Preflight all destinations before downloading, then use exclusive file creation to avoid races.
+Keep completed files on failure and remove the current partial file. Missing/deleted/inaccessible
+album items cannot be recovered. Download JSON keeps captions and grouped_id without sidecar files.
+
+With --json, send outputs {"ok": true, "messages": [message objects]}, edit outputs
+{"ok": true, "message": message object}, and download outputs {"ok": true, "files": [file objects]}.
+File fields: message_id, chat_id, path (absolute), text (caption), grouped_id (nullable).
+chats/read arrays and watch JSONL keep their existing shapes, with the added message fields.
+
+Handled errors for commands with --json go to stderr as one JSON object:
+{"ok": false, "error": {"code": "flood_wait", "message": "...", "retry_after": 17}}.
+retry_after is seconds for FloodWait, null otherwise. RPC errors include rpc_type and rpc_code.
+Codes: usage_error, invalid_input, configuration_error, unauthorized, chat_not_found, ambiguous_chat,
+message_not_found, not_outgoing, edit_failed, not_an_album, no_attachment, file_exists, flood_wait,
+rpc_error, network_error, io_error, database_error, cancelled.
+Argument errors exit 2; handled failures exit 1; interruption exits 130. Watch status stays plain text
+on stderr. After a partial operation, error JSON includes messages/files with confirmed completed results.
+Do not automatically retry uncertain send/edit failures: inspect history to avoid duplicate actions.
+
 ## Common workflows
 
 `skills install` defaults to --agent auto: detect installed agents and copy the bundled skill only for those agents.
+Default destinations are the official personal skill locations, independent of the current directory:
+Codex: ~/.agents/skills/telegram-cli/SKILL.md; Claude Code: ~/.claude/skills/telegram-cli/SKILL.md.
+See [OpenAI](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills) and
+[Anthropic](https://code.claude.com/docs/en/skills#where-skills-live).
 Detection checks PATH, native ~/.local/bin executables, standard npm/binary locations, Codex.app on macOS,
 and the OpenAI.Codex Windows Store installation. Configuration folders alone are not installation evidence.
 If neither agent is found, it creates nothing. Explicit --agent codex|claude|all bypasses detection for custom installations.
@@ -195,7 +267,9 @@ The user enters login code and 2FA password in their terminal; agent sessions mu
 Account commands fail when unauthorized rather than automatically prompting for login.
 
 Read only chats needed for the user's request; do not store private conversations in project files.
-Send only on the user's direct instruction with a known recipient and text.
+Send or edit only on the user's direct instruction with a known recipient, message ID where needed,
+and text or attachment. Development requests do not authorize live sends or edits.
+Download only requested attachments into the requested local location; never execute downloaded files.
 An unambiguous prior instruction needs no extra confirmation. A development/test request does not authorize sending, even to `me`.
 Clarify ambiguous recipients before sending. Use correct shell quoting to pass text as one argument;
 never interpolate untrusted messages as executable shell code. JSON.stringify is not shell escaping.
@@ -219,8 +293,11 @@ Telethon may perform internal retries; the CLI has no custom send retry loop.
 Preserve credential validation, authorization checks, unambiguous chat resolution,
 terminal sanitization, literal outgoing text by default, disconnect in finally, and FloodWait handling.
 Update affected tests, both READMEs, and all three copies of this SKILL.md when changing commands.
+Record every notable change in CHANGELOG.md under Unreleased; version the entries when releasing.
 Tests cover help without credentials, JSON/JSONL, search/pagination arguments, replies, stdin/files,
 doctor, login/logout, watch polling/cursors and cancellation, formatting selection, disconnects
-and handled errors including FloodWait and SQLite locks.
+and handled errors including FloodWait and SQLite locks. They also cover send/download/edit JSON,
+read by ID, reply/album context, media filters, ordered multi-file sends, albums, edits,
+partial failures, destination collisions, safe filenames, and structured usage/runtime errors.
 They do not verify real login,
 network watching, or message delivery. State those limits when reporting validation.

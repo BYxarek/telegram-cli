@@ -15,6 +15,10 @@
 
 </div>
 
+[Changelog](CHANGELOG.md)
+
+This project was created specifically to help AI agents manage Telegram chats more effectively: read conversations, send messages and files, and work with attachments through a CLI.
+
 ```console
 tcli                          # Show help and setup steps
 tcli chats                    # Find a chat
@@ -31,6 +35,7 @@ It uses the Telegram API and acts as your personal account. You need your own
 
 - **Chat list:** IDs, names, and unread counts.
 - **Message history:** recent messages, oldest first, with timestamps and sender IDs.
+- **Attachments:** upload photos, videos, audio, and documents; inspect metadata and download by message ID.
 - **Text messages:** send to Saved Messages, usernames, or chats where you can post.
 - **Live updates:** follow new messages in one chat until `Ctrl+C`.
 - **Local configuration:** enter API credentials once using `tcli config`.
@@ -44,9 +49,8 @@ are removed from displayed messages.
 
 ### Current scope
 
-One local account session, text messages, human-readable output, and optional JSON.
-Media is shown as a placeholder; uploading and downloading attachments are not implemented.
-Message editing, deletion, and a full-screen interface are not available.
+One local account session, text and attachments, human-readable output, and optional JSON.
+Message deletion and a full-screen interface are not available.
 
 ## Installation
 
@@ -181,6 +185,33 @@ Unknown commands and invalid arguments still return an error.
 
 ## Commands
 
+### Attachments
+
+```console
+tcli send me --attach photo.jpg --caption "Photo"
+tcli send me --attach video.mp4
+tcli send me --attach music.mp3
+tcli send me --attach archive.zip --as-file
+tcli send me --attach photo.jpg --caption "<b>Photo</b>" --format html --reply-to 123
+tcli read me --limit 10
+tcli download me 123 --output photo.jpg
+```
+
+`--attach` uploads one or more existing local files in order, including binary documents such as `.exe`, `.apk`, and `.zip`. Telethon selects the media representation;
+`--as-file` forces a document. Telegram enforces supported formats and file size limits.
+`--caption` and `--as-file` require `--attach`. `--file` still sends UTF-8 file contents as text.
+`read` and `watch` show attachment type, filename (when available), MIME type, size, and caption.
+Their JSON includes `media`: null or an object with `type`, `name`, `mime_type`, `size` (bytes),
+`ext`, `width`, `height`, and `duration` (seconds); unavailable fields are null.
+Other media, such as link previews, can have `has_media=true` with `media=null`.
+
+Use a real message ID from the selected chat with `download`. `--output` is an explicit file path;
+its parent must exist. Existing files are never overwritten, remote filenames never determine
+local paths, and failed or cancelled downloads remove the partial file.
+Photos download as stored by Telegram. Open the downloaded file in a local application to view it;
+the CLI displays metadata. Deletion and inline media playback are not supported.
+
+
 | Command | Purpose |
 | --- | --- |
 | `tcli config` | Save or replace API credentials |
@@ -188,6 +219,8 @@ Unknown commands and invalid arguments still return an error.
 | `tcli chats --limit 100` | List up to 100 chats; default: 50 |
 | `tcli read "Chat" --limit 20` | Read recent messages; default: 20 |
 | `tcli send "Chat" "Text"` | Send one plain-text message |
+| `tcli edit "Chat" 123 "New text"` | Edit an outgoing message or attachment caption |
+| `tcli download "Chat" 123 --output file.zip` | Download one attachment without overwriting |
 | `tcli watch "Chat"` | Follow new messages until `Ctrl+C` |
 | `tcli logout` | Revoke this CLI session, keeping API credentials |
 | `tcli help [COMMAND]` | Show general or command-specific help |
@@ -208,7 +241,7 @@ tcli send me --file message.txt
 
 `chats --json` and `read --json` return JSON arrays, including `[]` for empty results.
 Chat objects contain `id`, `name`, and `unread_count`. Message objects contain `id`,
-`chat_id`, `date` (ISO 8601 with offset), `sender_id` (nullable), `out`, `text`, and `has_media`.
+`chat_id`, `date` (ISO 8601 with offset), `sender_id` (nullable), `out`, `text`, `has_media`, `media`, `reply_to_id`, and `grouped_id`.
 JSON preserves original text, including Unicode and control characters as escaped sequences;
 human-readable output removes terminal controls. Media-only messages have empty JSON text.
 `watch --json` emits one message object per line (JSONL), flushing immediately.
@@ -219,11 +252,83 @@ within each returned page. `--before ID` excludes that ID and returns older mess
 use the smallest returned message ID for the next page. It can be combined with search.
 `--before` and `--reply-to` require positive message IDs from the same chat.
 
-`send` requires exactly one text source: a positional text argument, `--stdin`, or `--file PATH`.
+`send` requires exactly one source: positional text, `--stdin`, `--file PATH`, or `--attach PATH`.
 Files and stdin use UTF-8 (an optional BOM is accepted). Stdin is read until EOF;
 empty or whitespace-only input is rejected before connecting. Line breaks and surrounding
 whitespace are kept in plain mode. `--file` sends the file's text, not an attachment.
 All text sources support `--reply-to` and `--format`.
+
+### Message context, media filters, and editing
+
+```console
+tcli read "Chat" --id 123 --json
+tcli read "Chat" --media document --limit 20 --json
+tcli read "Chat" --media photo --search "holiday" --before 123 --json
+tcli edit "Chat" 123 "Corrected text" --json
+tcli edit "Chat" 123 --file caption.html --format html
+```
+
+`read --id ID` returns that message (a one-element array with `--json`) or a
+`message_not_found` error. It cannot be combined with `--before`, `--search`, or `--media`;
+`--limit` applies only to history. Message output includes `reply_to_id` and `grouped_id`
+(null when absent). Use `read --id` with `reply_to_id` to retrieve the original message.
+Human-readable output also shows reply and album IDs.
+
+`--media` uses Telegram's filters: `photo`, `video`, `document`, `audio` (music),
+`voice`, `video_note`, or `gif`. It combines with search, pagination, and limits.
+Search follows Telegram's text-search rules; it is not a local filename or extension search.
+
+`edit CHAT ID` changes the text or attachment caption of an outgoing message.
+Use exactly one text source: positional text, `--stdin`, or `--file PATH`, with optional
+`--format plain|markdown|html`. Empty text is rejected. Attachments themselves are not replaced.
+Telegram enforces edit permissions and time limits; an unchanged message may return an RPC error.
+
+### Multiple files and albums
+
+```console
+tcli send me --attach app.apk archive.zip --caption "App" --caption "Archive" --json
+tcli send me --attach first.jpg second.jpg --album --caption "First" --caption "Second" --json
+tcli download me 123 --album --output-dir downloads --json
+```
+
+Without `--album`, files are sent individually in the supplied order. Repeat `--caption`
+for each file in order; omitted captions are empty (use `--caption ""` to skip a caption).
+All files are checked before connecting. `--reply-to`, `--format`, and `--as-file` apply to all.
+`--album` sends 2-10 attachments as one group through Telethon. Use compatible Telegram album
+media; Telegram may reject incompatible combinations. A single caption belongs to the first item.
+
+Download an album using any of its message IDs. `--album` requires `--output-dir`, which must
+already exist. Files are saved oldest first as `<message_id><extension>` (for example `123.jpg`),
+using `.bin` for unknown or unsafe extensions. Remote names cannot escape the directory.
+All destinations are checked for collisions before downloading; existing files are never overwritten.
+If a later transfer fails, completed files remain and the current partial file is removed.
+JSON results keep each attachment's caption in `text` and its album ID in `grouped_id`.
+Deleted or inaccessible album items cannot be downloaded.
+
+### JSON results and errors
+
+`send --json` outputs `{"ok": true, "messages": [...]}` using the same message objects as `read`.
+`edit --json` outputs `{"ok": true, "message": {...}}`.
+`download --json` outputs `{"ok": true, "files": [...]}`; each file has `message_id`, `chat_id`,
+`path` (absolute), `text` (caption), and `grouped_id` (nullable).
+Existing `chats`/`read` arrays and `watch` JSONL remain unchanged apart from added message fields.
+
+Commands with `--json` emit handled errors as one JSON object on stderr, including argument errors:
+
+```json
+{"ok": false, "error": {"code": "flood_wait", "message": "Telegram rate limit: wait 17 seconds before trying again.", "retry_after": 17}}
+```
+
+`retry_after` is seconds for FloodWait and null otherwise. Stable codes include
+`usage_error`, `invalid_input`, `configuration_error`, `unauthorized`, `chat_not_found`,
+`ambiguous_chat`, `message_not_found`, `not_outgoing`, `edit_failed`, `not_an_album`,
+`no_attachment`, `file_exists`, `flood_wait`, `rpc_error`, `network_error`, `io_error`,
+`database_error`, and `cancelled`. RPC errors also include `rpc_type` and `rpc_code`.
+Exit codes remain 1 for handled failures, 2 for usage errors, and 130 for interruption.
+
+After a partial multi-file operation, the error object also includes `messages` or `files`
+with confirmed completed results. The CLI does not retry operations automatically; after an uncertain
+send/edit network failure, inspect history before retrying. Watch status still goes to stderr as text.
 
 ### Text formatting
 
@@ -308,6 +413,9 @@ Outgoing message text may be saved in your shell history.
 
 `tcli skills install` detects installed agents and installs the bundled skill only for those agents into
 `~/.agents/skills/telegram-cli/SKILL.md` (Codex) and `~/.claude/skills/telegram-cli/SKILL.md` (Claude Code).
+These are the official personal skill locations documented by [OpenAI](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills)
+and [Anthropic](https://code.claude.com/docs/en/skills#where-skills-live).
+`~` is your user home directory; installation does not depend on the current project folder.
 The default `--agent auto` checks PATH, native `~/.local/bin` executables, standard npm/binary locations,
 Codex.app on macOS, and the Windows Store Codex installation. Configuration folders alone do not count.
 If no agent is detected, no skill folders are created. Explicit `--agent codex`, `--agent claude`, or

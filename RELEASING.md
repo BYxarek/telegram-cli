@@ -44,7 +44,8 @@ It needs access to PyPI to install the wheel's dependencies; it never accesses T
 ## Publish a release
 
 1. Update `__version__` in `tcli_skills/__init__.py` for each new release. PyPI versions are immutable.
-2. Keep all three skill copies identical and update both READMEs.
+2. Keep all three skill copies identical and update both READMEs. Maintain `CHANGELOG.md`
+   under `Unreleased` for every change; move those entries into a versioned section for the release.
 3. Commit and push to `main`. Wait for the `Test, build, and publish` workflow to pass on Windows
    and Linux with Python 3.10 and 3.14, including the built-wheel installation check.
 4. Create a GitHub Release targeting that commit with a matching tag, initially `v0.1.0`, and publish it.

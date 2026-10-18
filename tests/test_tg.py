@@ -44,7 +44,7 @@ class HelpTests(unittest.TestCase):
         self.assertTrue(all(output == outputs[0] for output in outputs))
 
     def test_command_help_matches_help_flag(self):
-        for topic in ("config", "login", "logout", "doctor", "chats", "read", "send", "watch", "skills", "help"):
+        for topic in ("config", "login", "logout", "doctor", "chats", "read", "send", "edit", "download", "watch", "skills", "help"):
             with self.subTest(topic=topic):
                 result = self.command("help", topic)
                 flag = self.command(topic, "--help")
@@ -59,6 +59,9 @@ class HelpTests(unittest.TestCase):
                      ("send", "me", "text", "--reply-to", "0"),
                      ("send", "me", "text", "--format", "unknown"),
                      ("read", "me", "--before", "0"),
+                     ("send", "me", "text", "--attach", "photo.jpg"),
+                     ("download", "me", "1"),
+                     ("download", "me", "0", "--output", "file.bin"),
                      ("read", "me", "--limit", "0")):
             with self.subTest(args=args):
                 result = self.command(*args)
@@ -72,6 +75,8 @@ class HelpTests(unittest.TestCase):
         result = self.command("skills", "install", "--help")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--agent", result.stdout)
+        self.assertIn("~/.agents/skills/telegram-cli/SKILL.md", result.stdout)
+        self.assertIn("~/.claude/skills/telegram-cli/SKILL.md", result.stdout)
         for args in (("skills",), ("skills", "unknown"), ("skills", "install", "--agent", "unknown")):
             self.assertEqual(self.command(*args).returncode, 2)
 
@@ -355,6 +360,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(tg.load_credentials(self.path), (12345, "a" * 32))
 
 
+def fake_message(message_id=42, **changes):
+    values = dict(id=message_id, chat_id=1, date=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                  sender_id=1, out=True, raw_text="text", media=None, file=None,
+                  reply_to_msg_id=None, grouped_id=None)
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
 class FakeClient:
     def __init__(self, dialogs=()):
         self.dialogs = dialogs
@@ -362,7 +375,10 @@ class FakeClient:
         self.disconnect = AsyncMock()
         self.is_user_authorized = AsyncMock(return_value=True)
         self.get_input_entity = AsyncMock(return_value="self")
-        self.send_message = AsyncMock(return_value=SimpleNamespace(id=42))
+        self.send_message = AsyncMock(return_value=fake_message(42))
+        self.send_file = AsyncMock(return_value=fake_message(43))
+        self.edit_message = AsyncMock(return_value=fake_message(42))
+        self.download_media = AsyncMock()
         self.get_messages = AsyncMock(return_value=[])
         self.start = AsyncMock()
         self.get_me = AsyncMock(return_value=SimpleNamespace(bot=False, first_name="User", id=1))
@@ -468,7 +484,8 @@ class CliTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row["id"] for row in rows], [1, 2])
         self.assertEqual(rows[0]["text"], "")
         self.assertEqual(rows[1], {"id": 2, "chat_id": -1001, "date": "2026-01-01T00:00:00+00:00",
-                                  "sender_id": 2, "out": False, "text": "Привет\n\x1b\u202e", "has_media": False})
+                                  "sender_id": 2, "out": False, "text": "Привет\n\x1b\u202e", "has_media": False,
+                                  "media": None, "reply_to_id": None, "grouped_id": None})
         self.assertNotIn("\x1b", output.getvalue())
         self.assertNotIn("\u202e", output.getvalue())
 
@@ -636,6 +653,54 @@ class MainTests(unittest.TestCase):
         self.assertEqual(self.main("send", "me", "--file", str(path)), 1)
         self.factory.assert_not_called()
 
+    def test_attachment_upload_and_caption(self):
+        path = self.directory / "фото.jpg"
+        path.write_bytes(b"binary\x00\xff")
+        async def upload(chat, stream, **options):
+            self.assertEqual(chat, "self")
+            self.assertEqual(stream.read(), b"binary\x00\xff")
+            self.assertEqual(stream.name, str(path))
+            return SimpleNamespace(id=43)
+        self.client.send_file.side_effect = upload
+        for extra, caption, mode, document in (([], "", None, False),
+                (["--caption", "<b>Photo</b>", "--format", "html", "--as-file"],
+                 "<b>Photo</b>", "html", True)):
+            self.assertEqual(self.main("send", "me", "--attach", str(path), "--reply-to", "12", *extra), 0)
+            options = self.client.send_file.await_args.kwargs
+            self.assertEqual(options, dict(caption=caption, force_document=document, parse_mode=mode, reply_to=12))
+            self.assertTrue(self.client.send_file.await_args.args[1].closed)
+        self.client.send_message.assert_not_awaited()
+        self.assertIn("ID: 43", self.output.getvalue())
+
+    def test_invalid_attachments_do_not_connect(self):
+        for args in (("--attach", str(self.directory / "missing")), ("--attach", str(self.directory)),
+                     ("text", "--caption", "caption"), ("text", "--as-file")):
+            self.assertEqual(self.main("send", "me", *args), 1)
+        self.factory.assert_not_called()
+
+    def test_binary_documents_are_not_decoded_as_text(self):
+        content = b"\x00\xff\xfe\x80binary"
+        async def upload(chat, stream, **options):
+            self.assertEqual(stream.read(), content)
+            return SimpleNamespace(id=43)
+        self.client.send_file.side_effect = upload
+        for extension in ("exe", "apk", "zip", "bin", "mp4", "mp3"):
+            with self.subTest(extension=extension):
+                path = self.directory / ("attachment." + extension)
+                path.write_bytes(content)
+                self.assertEqual(self.main("send", "me", "--attach", str(path)), 0)
+                self.assertEqual(self.client.send_file.await_args.args[1].name, str(path))
+        self.client.send_message.assert_not_awaited()
+
+    def test_attachment_upload_failure_disconnects(self):
+        path = self.directory / "file.bin"
+        path.write_bytes(b"data")
+        self.client.send_file.side_effect = OSError("offline")
+        self.assertEqual(self.main("send", "me", "--attach", str(path)), 1)
+        self.client.disconnect.assert_awaited_once()
+        self.assertTrue(self.client.send_file.await_args.args[1].closed)
+        self.assertNotIn("Message sent", self.output.getvalue())
+
     def test_doctor_local_and_connected(self):
         self.assertEqual(self.main("doctor"), 1)
         self.assertFalse((self.directory / "telegram-cli").exists())
@@ -674,6 +739,308 @@ class MainTests(unittest.TestCase):
                 self.assertEqual(self.main("read", "me"), code)
                 self.assertIn(expected, self.errors.getvalue())
                 self.client.disconnect.assert_awaited_once()
+
+    def test_send_json_result(self):
+        self.assertEqual(self.main("send", "me", "text", "--json"), 0)
+        result = json.loads(self.output.getvalue())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["messages"], [tg.message_data(self.client.send_message.return_value)])
+        self.assertEqual(self.errors.getvalue(), "")
+
+    def test_read_id_and_reply_album_context(self):
+        message = fake_message(12, reply_to_msg_id=8, grouped_id=123456)
+        self.client.get_messages.return_value = message
+        self.assertEqual(self.main("read", "me", "--id", "12", "--json"), 0)
+        self.client.get_messages.assert_awaited_once_with("self", ids=12)
+        row = json.loads(self.output.getvalue())[0]
+        self.assertEqual((row["reply_to_id"], row["grouped_id"]), (8, 123456))
+        with patch("builtins.print") as output:
+            tg.show_message(message)
+        self.assertIn("[reply to #8] [album 123456]", output.call_args.args[0])
+
+    def test_media_filters_combine_with_search_and_pagination(self):
+        for name, expected in tg.MEDIA_FILTERS.items():
+            with self.subTest(media=name):
+                self.assertEqual(self.main("read", "me", "--media", name, "--search", "test",
+                                           "--before", "12", "--limit", "3", "--json"), 0)
+                options = self.client.get_messages.await_args.kwargs
+                self.assertIsInstance(options.pop("filter"), expected)
+                self.assertEqual(options, dict(limit=3, search="test", offset_id=12))
+
+    def test_invalid_new_argument_combinations_do_not_connect(self):
+        path = self.directory / "file.bin"
+        path.write_bytes(b"data")
+        cases = [("read", "me", "--id", "1", "--search", "text"),
+                 ("read", "me", "--id", "1", "--media", "photo"),
+                 ("send", "me", "--attach", str(path), "--album"),
+                 ("send", "me", "--attach", *([str(path)] * 11), "--album"),
+                 ("send", "me", "--attach", str(path), "--caption", "a", "--caption", "b"),
+                 ("download", "me", "1", "--output", str(path), "--album"),
+                 ("download", "me", "1", "--output-dir", str(self.directory)),
+                 ("download", "me", "1", "--output", str(self.directory / "missing" / "a")),
+                 ("edit", "me", "1", " ")]
+        for args in cases:
+            with self.subTest(args=args):
+                self.assertEqual(self.main(*args), 1)
+        self.factory.assert_not_called()
+
+    def test_multi_file_send_preserves_order_and_captions(self):
+        paths = [self.directory / "a.exe", self.directory / "b.apk", self.directory / "c.zip"]
+        for number, path in enumerate(paths):
+            path.write_bytes(bytes([number, 255]))
+        seen = []
+        async def upload(chat, stream, **options):
+            seen.append((Path(stream.name), stream.read(), options["caption"]))
+            return fake_message(42 + len(seen))
+        self.client.send_file.side_effect = upload
+        self.assertEqual(self.main("send", "me", "--attach", *map(str, paths), "--caption", "one",
+                                   "--caption", "two", "--reply-to", "8", "--json"), 0)
+        self.assertEqual(seen, [(paths[0], b"\x00\xff", "one"), (paths[1], b"\x01\xff", "two"),
+                                (paths[2], b"\x02\xff", "")])
+        self.assertEqual([item["id"] for item in json.loads(self.output.getvalue())["messages"]], [43, 44, 45])
+        for invocation in self.client.send_file.await_args_list:
+            self.assertTrue(invocation.args[1].closed)
+            self.assertEqual(invocation.kwargs["reply_to"], 8)
+
+    def test_album_send_uses_one_group_with_caption_per_file(self):
+        paths = [self.directory / "a.jpg", self.directory / "b.jpg"]
+        for path in paths:
+            path.write_bytes(b"photo")
+        async def upload(chat, streams, **options):
+            self.assertEqual([Path(stream.name) for stream in streams], paths)
+            self.assertEqual([stream.read() for stream in streams], [b"photo", b"photo"])
+            return [fake_message(10, grouped_id=77), fake_message(11, grouped_id=77)]
+        self.client.send_file.side_effect = upload
+        self.assertEqual(self.main("send", "me", "--attach", *map(str, paths), "--album", "--caption", "first",
+                                   "--caption", "<b>second</b>", "--format", "html", "--json"), 0)
+        self.client.send_file.assert_awaited_once()
+        self.assertEqual(self.client.send_file.await_args.kwargs["caption"], ["first", "<b>second</b>"])
+        self.assertEqual(self.client.send_file.await_args.kwargs["parse_mode"], "html")
+        self.assertTrue(all(stream.closed for stream in self.client.send_file.await_args.args[1]))
+        self.assertEqual([item["grouped_id"] for item in json.loads(self.output.getvalue())["messages"]], [77, 77])
+
+    def test_failed_multi_send_reports_completed_messages_without_retry(self):
+        paths = [self.directory / "a.zip", self.directory / "b.zip"]
+        for path in paths:
+            path.write_bytes(b"data")
+        self.client.send_file.side_effect = [fake_message(10), ConnectionError("offline")]
+        self.assertEqual(self.main("send", "me", "--attach", *map(str, paths), "--json"), 1)
+        result = json.loads(self.errors.getvalue())
+        self.assertEqual(result["error"]["code"], "network_error")
+        self.assertEqual([item["id"] for item in result["messages"]], [10])
+        self.assertEqual(self.output.getvalue(), "")
+        self.assertEqual(self.client.send_file.await_count, 2)
+        self.client.disconnect.assert_awaited_once()
+
+    def test_edit_text_file_and_stdin_with_formatting(self):
+        path = self.directory / "caption.txt"
+        path.write_text("<b>new</b>", encoding="utf-8-sig")
+        self.client.get_messages.return_value = fake_message()
+        for source in (["<b>new</b>"], ["--file", str(path)], ["--stdin"]):
+            with self.subTest(source=source), io.TextIOWrapper(io.BytesIO(b"<b>new</b>")) as stream, \
+                    patch("sys.stdin", stream):
+                self.output.seek(0)
+                self.output.truncate()
+                self.assertEqual(self.main("edit", "me", "42", *source, "--format", "html", "--json"), 0)
+                self.client.edit_message.assert_awaited_with("self", 42, "<b>new</b>", parse_mode="html")
+                self.assertEqual(json.loads(self.output.getvalue())["message"]["id"], 42)
+
+    def test_edit_rejects_missing_or_incoming_messages(self):
+        for message, code in ((None, "message_not_found"), (fake_message(out=False), "not_outgoing")):
+            self.errors.seek(0)
+            self.errors.truncate()
+            self.client.get_messages.return_value = message
+            self.assertEqual(self.main("edit", "me", "42", "new", "--json"), 1)
+            self.assertEqual(json.loads(self.errors.getvalue())["error"]["code"], code)
+        self.client.edit_message.assert_not_awaited()
+
+    def test_json_error_codes_retry_wait_and_interruption(self):
+        for failure, code, exit_code in (
+                (tg.FloodWaitError(request=None, capture=17), "flood_wait", 1),
+                (tg.RPCError(request=None, message="denied", code=400), "rpc_error", 1),
+                (ConnectionError("offline"), "network_error", 1),
+                (sqlite3.OperationalError("locked"), "database_error", 1),
+                (KeyboardInterrupt(), "cancelled", 130)):
+            with self.subTest(code=code):
+                self.errors.seek(0)
+                self.errors.truncate()
+                self.client.connect.side_effect = failure
+                self.assertEqual(self.main("read", "me", "--json"), exit_code)
+                result = json.loads(self.errors.getvalue())
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["code"], code)
+                self.assertEqual(result["error"]["retry_after"], 17 if code == "flood_wait" else None)
+                if code == "rpc_error":
+                    self.assertEqual(result["error"]["rpc_code"], 400)
+                self.assertEqual(self.output.getvalue(), "")
+
+    def test_configuration_and_usage_errors_are_json(self):
+        with patch.dict(os.environ, {"TG_API_HASH": "invalid"}):
+            self.assertEqual(self.main("send", "me", "text", "--json"), 1)
+        self.assertEqual(json.loads(self.errors.getvalue())["error"]["code"], "configuration_error")
+        self.errors.seek(0)
+        self.errors.truncate()
+        with self.assertRaises(SystemExit) as error:
+            self.main("read", "me", "--limit", "0", "--json")
+        self.assertEqual(error.exception.code, 2)
+        self.assertEqual(json.loads(self.errors.getvalue())["error"]["code"], "usage_error")
+        self.factory.assert_not_called()
+
+    def album(self):
+        messages = [fake_message(number, grouped_id=77, file=SimpleNamespace(ext=extension))
+                    for number, extension in ((10, ".zip"), (100, ".apk"), (200, "../../bad"))]
+        self.client.get_messages.side_effect = [messages[1], [messages[0], fake_message(9)],
+                                                [messages[2], fake_message(201)]]
+        return messages
+
+    def test_single_download_json_result(self):
+        self.client.get_messages.return_value = fake_message(file=SimpleNamespace(ext=".zip"))
+        async def download(message, file):
+            file.write(b"\x00\xffzip")
+            return file
+        self.client.download_media.side_effect = download
+        path = self.directory / "archive.zip"
+        self.assertEqual(self.main("download", "me", "42", "--output", str(path), "--json"), 0)
+        self.assertEqual(json.loads(self.output.getvalue()), {"ok": True, "files": [
+            {"message_id": 42, "chat_id": 1, "path": str(path.resolve()), "text": "text", "grouped_id": None}]})
+        self.assertEqual(path.read_bytes(), b"\x00\xffzip")
+
+    def test_album_download_preserves_order_handles_id_gaps_and_safe_names(self):
+        messages = self.album()
+        seen = []
+        async def download(message, file):
+            seen.append(message.id)
+            file.write(str(message.id).encode())
+            return file
+        self.client.download_media.side_effect = download
+        self.assertEqual(self.main("download", "me", "100", "--album", "--output-dir", str(self.directory), "--json"), 0)
+        self.assertEqual(seen, [10, 100, 200])
+        self.assertEqual(self.client.get_messages.await_args_list, [call("self", ids=100),
+            call("self", limit=10, offset_id=100), call("self", limit=10, min_id=100, reverse=True)])
+        result = json.loads(self.output.getvalue())
+        self.assertEqual([Path(item["path"]).name for item in result["files"]], ["10.zip", "100.apk", "200.bin"])
+        for item in result["files"]:
+            self.assertEqual(Path(item["path"]).read_bytes(), str(item["message_id"]).encode())
+
+    def test_album_download_checks_all_collisions_before_writing(self):
+        self.album()
+        path = self.directory / "100.apk"
+        path.write_bytes(b"original")
+        self.assertEqual(self.main("download", "me", "100", "--album", "--output-dir", str(self.directory), "--json"), 1)
+        self.assertEqual(json.loads(self.errors.getvalue())["error"]["code"], "file_exists")
+        self.assertEqual(path.read_bytes(), b"original")
+        self.assertEqual([item for item in self.directory.iterdir() if item.is_file()], [path])
+        self.client.download_media.assert_not_awaited()
+
+    def test_partial_album_download_reports_saved_files_and_removes_incomplete_file(self):
+        self.album()
+        async def download(message, file):
+            file.write(b"data")
+            if message.id == 100:
+                raise ConnectionError("offline")
+            return file
+        self.client.download_media.side_effect = download
+        self.assertEqual(self.main("download", "me", "100", "--album", "--output-dir", str(self.directory), "--json"), 1)
+        result = json.loads(self.errors.getvalue())
+        self.assertEqual(result["error"]["code"], "network_error")
+        self.assertEqual([item["message_id"] for item in result["files"]], [10])
+        self.assertEqual([item for item in self.directory.iterdir() if item.is_file()], [self.directory / "10.zip"])
+        self.assertEqual(self.output.getvalue(), "")
+
+    def test_album_download_rejects_non_album_messages(self):
+        self.client.get_messages.return_value = fake_message(file=SimpleNamespace(ext=".zip"))
+        self.assertEqual(self.main("download", "me", "42", "--album", "--output-dir", str(self.directory), "--json"), 1)
+        self.assertEqual(json.loads(self.errors.getvalue())["error"]["code"], "not_an_album")
+        self.client.download_media.assert_not_awaited()
+
+
+class MediaTests(unittest.IsolatedAsyncioTestCase):
+    def message(self):
+        from telethon.tl.types import Message, MessageMediaDocument, Document, DocumentAttributeFilename
+        return Message(id=7, peer_id=None, date=datetime(2026, 1, 1, tzinfo=timezone.utc), message="caption",
+                       media=MessageMediaDocument(document=Document(
+                           id=1, access_hash=2, file_reference=b"", date=datetime.now(timezone.utc),
+                           mime_type="application/pdf", size=4, dc_id=2,
+                           attributes=[DocumentAttributeFilename("../report\x1b\u202e.pdf")])))
+
+    async def test_media_metadata_and_sanitized_display(self):
+        message = self.message()
+        metadata = tg.message_data(message)["media"]
+        self.assertEqual(metadata, dict(type="document", name="../report\x1b\u202e.pdf",
+                         mime_type="application/pdf", size=4, ext=".pdf", width=None, height=None, duration=None))
+        client = FakeClient()
+        client.get_messages.return_value = [message]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            await tg.run(client, tg.parser().parse_args(["read", "me"]))
+        self.assertIn("caption", output.getvalue())
+        self.assertIn("document, ../report.pdf, application/pdf, 4 bytes", output.getvalue())
+        self.assertNotIn("\x1b", output.getvalue())
+        self.assertNotIn("\u202e", output.getvalue())
+
+    async def test_photo_metadata_without_filename_and_service_message(self):
+        from telethon.tl.types import Message, MessageMediaPhoto, Photo, PhotoSize
+        message = Message(id=8, peer_id=None, message="", date=datetime.now(timezone.utc), media=MessageMediaPhoto(
+            photo=Photo(id=1, access_hash=2, file_reference=b"", date=datetime.now(timezone.utc),
+                        sizes=[PhotoSize(type="x", w=100, h=50, size=20)], dc_id=2)))
+        data = tg.media_data(message)
+        self.assertEqual((data["type"], data["name"], data["width"], data["height"]), ("photo", None, 100, 50))
+        with patch("builtins.print") as output:
+            tg.show_message(message)
+        self.assertIn("photo, image/jpeg, 20 bytes", output.call_args.args[0])
+        self.assertIsNone(tg.media_data(SimpleNamespace(media=None)))
+
+    async def test_download_bytes_uses_explicit_path_and_never_overwrites(self):
+        client = FakeClient()
+        message = self.message()
+        client.get_messages.return_value = message
+        async def download(message, file):
+            file.write(b"data")
+            return file
+        client.download_media.side_effect = download
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "chosen.pdf"
+            args = tg.parser().parse_args(["download", "me", "7", "--output", str(path)])
+            with patch("builtins.print"):
+                await tg.run(client, args)
+            self.assertEqual(path.read_bytes(), b"data")
+            client.get_messages.assert_awaited_once_with("self", ids=7)
+            with self.assertRaises(FileExistsError):
+                await tg.run(client, args)
+            self.assertEqual(path.read_bytes(), b"data")
+            client.download_media.assert_awaited_once()
+            self.assertEqual(list(Path(directory).iterdir()), [path])
+
+    async def test_failed_or_cancelled_download_removes_partial_file(self):
+        import asyncio
+        for failure in (OSError("offline"), asyncio.CancelledError(), None):
+            client = FakeClient()
+            client.get_messages.return_value = self.message()
+            async def download(message, file):
+                file.write(b"partial")
+                if failure is not None:
+                    raise failure
+                return None
+            client.download_media.side_effect = download
+            with TemporaryDirectory() as directory:
+                path = Path(directory) / "file.pdf"
+                args = tg.parser().parse_args(["download", "me", "7", "--output", str(path)])
+                with self.assertRaises(type(failure) if failure is not None else ValueError):
+                    await tg.run(client, args)
+                self.assertFalse(path.exists())
+            client.disconnect.assert_awaited_once()
+
+    async def test_missing_message_or_attachment_creates_nothing(self):
+        for message in (None, SimpleNamespace(file=None)):
+            client = FakeClient()
+            client.get_messages.return_value = message
+            with TemporaryDirectory() as directory:
+                path = Path(directory) / "file.bin"
+                with self.assertRaises(ValueError):
+                    await tg.run(client, tg.parser().parse_args(["download", "me", "1", "--output", str(path)]))
+                self.assertFalse(path.exists())
+            client.download_media.assert_not_awaited()
+            client.disconnect.assert_awaited_once()
 
 
 if __name__ == "__main__":
