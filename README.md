@@ -219,6 +219,7 @@ the CLI displays metadata. Deletion and inline media playback are not supported.
 | `tcli chats --limit 100` | List up to 100 chats; default: 50 |
 | `tcli read "Chat" --limit 20` | Read recent messages; default: 20 |
 | `tcli send "Chat" "Text"` | Send one plain-text message |
+| `tcli forward "Source" 123 "Destination"` | Forward a message or attachment without local transfer |
 | `tcli edit "Chat" 123 "New text"` | Edit an outgoing message or attachment caption |
 | `tcli download "Chat" 123 --output file.zip` | Download one attachment without overwriting |
 | `tcli watch "Chat"` | Follow new messages until `Ctrl+C` |
@@ -269,7 +270,7 @@ tcli edit "Chat" 123 --file caption.html --format html
 ```
 
 `read --id ID` returns that message (a one-element array with `--json`) or a
-`message_not_found` error. It cannot be combined with `--before`, `--search`, or `--media`;
+`message_not_found` error. It cannot be combined with `--around`, `--before`, or search/media/filename filters;
 `--limit` applies only to history. Message output includes `reply_to_id` and `grouped_id`
 (null when absent). Use `read --id` with `reply_to_id` to retrieve the original message.
 Human-readable output also shows reply and album IDs.
@@ -327,8 +328,50 @@ Commands with `--json` emit handled errors as one JSON object on stderr, includi
 Exit codes remain 1 for handled failures, 2 for usage errors, and 130 for interruption.
 
 After a partial multi-file operation, the error object also includes `messages` or `files`
-with confirmed completed results. The CLI does not retry operations automatically; after an uncertain
+with confirmed completed results. With progress enabled, stderr may contain progress events before the error.
+The CLI does not retry operations automatically; after an uncertain
 send/edit network failure, inspect history before retrying. Watch status still goes to stderr as text.
+
+### Filename search, conversation context, forwarding, and progress
+
+```console
+tcli read "Chat" --filename "*.apk" --scan-limit 1000 --limit 5 --json
+tcli read "Chat" --filename "backup-*.zip" --before 12345 --json
+tcli read "Chat" --around 123 --context 5 --json
+tcli forward "Source chat" 123 "Destination chat" --json
+tcli send me --attach archive.zip --progress --json
+tcli download me 123 --output archive.zip --progress --json
+```
+
+`--filename` matches original attachment names locally using case-insensitive glob patterns
+(`*`, `?`, `[abc]`). Messages without a filename do not match. `--scan-limit` bounds the newest
+messages inspected (default: 1000, after any Telegram search/media filters); `--limit` bounds
+matching results. Results remain oldest first. Increase the scan limit or use `--before` for older
+history; no matches within the scan does not prove that the entire chat has no matching file.
+`--scan-limit` requires `--filename`, which also combines with `--search`, `--media`, and `--before`.
+
+`--around ID` returns the selected message and up to `--context N` messages on each side
+(default: 5). It uses chat history order, not consecutive IDs. At history boundaries fewer messages
+may be available. Missing target messages produce `message_not_found`. `--around` excludes
+`--id`, `--before`, and search/media/filename filters. `--context` requires `--around`;
+`--limit` applies only to history and filename search.
+
+`forward FROM_CHAT ID TO_CHAT` forwards one message, including its attachment and caption,
+through Telegram without downloading or uploading files. Both selectors use the normal chat rules.
+The result has the same JSON shape as `send`. Forward attribution is retained; Telegram may reject
+protected content or destinations where you cannot post. Forward only on explicit user instruction;
+a development/test request does not authorize a live forward. Inspect history before retrying an
+uncertain network failure. For negative IDs, place options before `--`, then all positional arguments.
+
+Upload/download progress is enabled automatically when stderr is a terminal. `--progress` enables
+it when redirected; `--no-progress` disables it. These flags apply to attachment sends and downloads.
+Progress includes transferred/total bytes, percentage, and average bytes per second; album upload
+progress is weighted by local file sizes. Updates are throttled to twice per second, plus completion.
+With `--json`, stderr receives JSONL events with `event="transfer_progress"`, `operation`, `file`,
+`transferred_bytes`, `total_bytes`, `percent` (null for unknown/zero size), and `bytes_per_second`.
+Errors are still JSON objects on stderr; distinguish them from progress by `ok=false`.
+Stdout contains only the final result. Progress measures transfer work, not confirmed delivery;
+cached uploads may produce no progress events.
 
 ### Text formatting
 

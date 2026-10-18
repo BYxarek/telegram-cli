@@ -179,7 +179,7 @@ Messages deleted before polling cannot be seen. `watch` has no past history; pre
 ## Automation, context, filters, and editing
 
 `read CHAT --id ID` fetches one message or fails with message_not_found. JSON remains an array
-with one item. --id cannot combine with --before, --search, or --media; --limit applies only to history.
+with one item. --id cannot combine with --around, --before, or search/media/filename filters; --limit applies only to history.
 `read --media photo|video|document|audio|voice|video_note|gif` uses native Telegram filters;
 audio means music. Filters combine with --search, --before, and --limit.
 Search follows Telegram text-search semantics, not local filename/extension matching.
@@ -213,6 +213,34 @@ rpc_error, network_error, io_error, database_error, cancelled.
 Argument errors exit 2; handled failures exit 1; interruption exits 130. Watch status stays plain text
 on stderr. After a partial operation, error JSON includes messages/files with confirmed completed results.
 Do not automatically retry uncertain send/edit failures: inspect history to avoid duplicate actions.
+
+## Filename search, surrounding context, forwarding, and progress
+
+`read CHAT --filename "*.apk" --scan-limit 1000 --limit 5 --json` matches original attachment
+names locally with case-insensitive glob patterns (*, ?, [abc]). Messages without names are skipped.
+--scan-limit (default 1000) bounds the newest messages inspected after Telegram search/media filters;
+--limit bounds matches. Results stay oldest first. Combine with --before, --search, or --media.
+No matches in the bounded scan do not prove absence across the whole chat. --scan-limit requires --filename.
+
+`read CHAT --around ID --context N` fetches the selected message and up to N neighbors on each side
+(default 5), ordered chronologically. IDs need not be consecutive. Missing anchor: message_not_found.
+--around excludes --id, --before, --search, --media, --filename, and --scan-limit.
+--context requires --around. --limit only applies to history and filename search.
+
+`forward FROM_CHAT ID TO_CHAT [--json]` forwards one message, attachment and caption included,
+using native Telegram forwarding without local download/upload. Standard chat selectors apply on
+both sides. Preserve attribution. Telegram enforces protected-content and posting restrictions.
+JSON success uses the send shape: {"ok": true, "messages": [message object]}.
+Forward only on explicit user instruction with known source, message ID, and destination.
+Development/testing does not authorize live forwarding. Verify history before retrying an uncertain failure.
+
+send (attachments only) and download support --progress / --no-progress.
+Default: enabled when stderr is a terminal. Progress reports bytes, percentage, and average bytes/sec
+on stderr; album upload weights Telethon's per-file progress by local file sizes.
+Throttle updates to twice per second, plus completion. With --json, progress is JSONL on stderr:
+event="transfer_progress", operation="upload"|"download", file, transferred_bytes, total_bytes,
+percent (null for unknown/zero size), bytes_per_second. Errors have ok=false and may follow progress events.
+Stdout remains the final JSON result. Progress is not proof of delivery; cached transfers may emit no events.
 
 ## Common workflows
 
@@ -267,7 +295,7 @@ The user enters login code and 2FA password in their terminal; agent sessions mu
 Account commands fail when unauthorized rather than automatically prompting for login.
 
 Read only chats needed for the user's request; do not store private conversations in project files.
-Send or edit only on the user's direct instruction with a known recipient, message ID where needed,
+Send, forward, or edit only on the user's direct instruction with a known recipient, message ID where needed,
 and text or attachment. Development requests do not authorize live sends or edits.
 Download only requested attachments into the requested local location; never execute downloaded files.
 An unambiguous prior instruction needs no extra confirmation. A development/test request does not authorize sending, even to `me`.
@@ -298,6 +326,7 @@ Tests cover help without credentials, JSON/JSONL, search/pagination arguments, r
 doctor, login/logout, watch polling/cursors and cancellation, formatting selection, disconnects
 and handled errors including FloodWait and SQLite locks. They also cover send/download/edit JSON,
 read by ID, reply/album context, media filters, ordered multi-file sends, albums, edits,
-partial failures, destination collisions, safe filenames, and structured usage/runtime errors.
+partial failures, destination collisions, safe filenames, structured usage/runtime errors,
+bounded filename search, surrounding context, forwarding, and transfer progress.
 They do not verify real login,
 network watching, or message delivery. State those limits when reporting validation.

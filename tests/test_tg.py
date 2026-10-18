@@ -44,7 +44,7 @@ class HelpTests(unittest.TestCase):
         self.assertTrue(all(output == outputs[0] for output in outputs))
 
     def test_command_help_matches_help_flag(self):
-        for topic in ("config", "login", "logout", "doctor", "chats", "read", "send", "edit", "download", "watch", "skills", "help"):
+        for topic in ("config", "login", "logout", "doctor", "chats", "read", "send", "edit", "download", "forward", "watch", "skills", "help"):
             with self.subTest(topic=topic):
                 result = self.command("help", topic)
                 flag = self.command(topic, "--help")
@@ -368,6 +368,11 @@ def fake_message(message_id=42, **changes):
     return SimpleNamespace(**values)
 
 
+def fake_file(name):
+    return SimpleNamespace(name=name, mime_type="application/octet-stream", size=1,
+                           ext=".bin", width=None, height=None, duration=None)
+
+
 class FakeClient:
     def __init__(self, dialogs=()):
         self.dialogs = dialogs
@@ -378,6 +383,7 @@ class FakeClient:
         self.send_message = AsyncMock(return_value=fake_message(42))
         self.send_file = AsyncMock(return_value=fake_message(43))
         self.edit_message = AsyncMock(return_value=fake_message(42))
+        self.forward_messages = AsyncMock(return_value=fake_message(44))
         self.download_media = AsyncMock()
         self.get_messages = AsyncMock(return_value=[])
         self.start = AsyncMock()
@@ -952,6 +958,158 @@ class MainTests(unittest.TestCase):
         self.assertEqual(self.main("download", "me", "42", "--album", "--output-dir", str(self.directory), "--json"), 1)
         self.assertEqual(json.loads(self.errors.getvalue())["error"]["code"], "not_an_album")
         self.client.download_media.assert_not_awaited()
+
+    def test_filename_search_is_bounded_case_insensitive_and_limits_matches(self):
+        self.client.get_messages.return_value = [fake_message(9), fake_message(8, file=fake_file(None)),
+            fake_message(7, file=fake_file("app.APK")), fake_message(6, file=fake_file("app.zip")),
+            fake_message(5, file=fake_file("old.apk")), fake_message(4, file=fake_file("older.apk"))]
+        self.assertEqual(self.main("read", "me", "--filename", "*.apk", "--scan-limit", "6",
+                                   "--limit", "2", "--before", "10", "--json"), 0)
+        self.client.get_messages.assert_awaited_once_with("self", limit=6, offset_id=10)
+        self.assertEqual([row["id"] for row in json.loads(self.output.getvalue())], [5, 7])
+
+    def test_filename_search_defaults_and_empty_results(self):
+        self.assertEqual(self.main("read", "me", "--filename", "report-?.[pz]*", "--json"), 0)
+        self.client.get_messages.assert_awaited_once_with("self", limit=1000)
+        self.assertEqual(json.loads(self.output.getvalue()), [])
+
+    def test_filename_search_combines_with_telegram_filters_and_search(self):
+        self.assertEqual(self.main("read", "me", "--filename", "*.zip", "--media", "document",
+                                   "--search", "backup", "--json"), 0)
+        options = self.client.get_messages.await_args.kwargs
+        self.assertIsInstance(options["filter"], tg.MEDIA_FILTERS["document"])
+        self.assertEqual(options["search"], "backup")
+        self.assertEqual(options["limit"], 1000)
+
+    def test_around_reads_neighbors_in_order_even_with_id_gaps(self):
+        self.client.get_messages.side_effect = [fake_message(100), [fake_message(30), fake_message(10)],
+                                                [fake_message(200), fake_message(400)]]
+        self.assertEqual(self.main("read", "me", "--around", "100", "--context", "2", "--json"), 0)
+        self.assertEqual([row["id"] for row in json.loads(self.output.getvalue())], [10, 30, 100, 200, 400])
+        self.assertEqual(self.client.get_messages.await_args_list, [call("self", ids=100),
+            call("self", limit=2, offset_id=100), call("self", limit=2, min_id=100, reverse=True)])
+
+    def test_around_defaults_and_missing_target(self):
+        self.client.get_messages.side_effect = [fake_message(1), [], []]
+        self.assertEqual(self.main("read", "me", "--around", "1", "--json"), 0)
+        self.assertEqual([row["id"] for row in json.loads(self.output.getvalue())], [1])
+        self.assertEqual(self.client.get_messages.await_args.kwargs["limit"], 5)
+        self.client.get_messages.side_effect = [None]
+        self.assertEqual(self.main("read", "me", "--around", "2", "--json"), 1)
+        self.assertEqual(json.loads(self.errors.getvalue())["error"]["code"], "message_not_found")
+
+    def test_invalid_search_context_and_progress_arguments_do_not_connect(self):
+        for args in (("read", "me", "--context", "5"), ("read", "me", "--scan-limit", "10"),
+                     ("read", "me", "--filename", " "),
+                     ("read", "me", "--around", "1", "--filename", "*.zip"),
+                     ("read", "me", "--id", "1", "--filename", "*.apk"),
+                     ("read", "me", "--around", "1", "--search", "text"),
+                     ("send", "me", "text", "--progress")):
+            with self.subTest(args=args):
+                self.assertEqual(self.main(*args), 1)
+        self.factory.assert_not_called()
+
+    def test_forward_uses_requested_source_and_destination_without_file_transfer(self):
+        self.client.get_input_entity.side_effect = ["source", "destination"]
+        self.assertEqual(self.main("forward", "me", "123", "@recipient", "--json"), 0)
+        self.client.forward_messages.assert_awaited_once_with("destination", 123, from_peer="source")
+        self.assertEqual(self.client.get_input_entity.await_args_list, [call("me"), call("@recipient")])
+        self.assertEqual(json.loads(self.output.getvalue())["messages"][0]["id"], 44)
+        self.client.send_file.assert_not_awaited()
+        self.client.download_media.assert_not_awaited()
+        self.client.disconnect.assert_awaited_once()
+
+    def test_forward_missing_protected_and_unauthorized_messages(self):
+        for failure, code in ((None, "message_not_found"),
+                              (tg.RPCError(request=None, message="CHAT_FORWARDS_RESTRICTED", code=400), "rpc_error")):
+            with self.subTest(code=code):
+                self.errors.seek(0)
+                self.errors.truncate()
+                self.client.forward_messages.reset_mock()
+                self.client.forward_messages.return_value = None
+                self.client.forward_messages.side_effect = failure
+                self.assertEqual(self.main("forward", "me", "123", "@recipient", "--json"), 1)
+                self.assertEqual(json.loads(self.errors.getvalue())["error"]["code"], code)
+                self.assertEqual(self.client.forward_messages.await_count, 1)
+        self.client.is_user_authorized.return_value = False
+        self.client.forward_messages.reset_mock()
+        self.assertEqual(self.main("forward", "me", "123", "@recipient", "--json"), 1)
+        self.client.forward_messages.assert_not_awaited()
+
+    def test_transfer_progress_keeps_json_stdout_clean(self):
+        path = self.directory / "file.bin"
+        path.write_bytes(b"data")
+        async def upload(chat, stream, **options):
+            options["progress_callback"](4, 4)
+            return fake_message(43)
+        self.client.send_file.side_effect = upload
+        self.assertEqual(self.main("send", "me", "--attach", str(path), "--progress", "--json"), 0)
+        self.assertTrue(json.loads(self.output.getvalue())["ok"])
+        event = json.loads(self.errors.getvalue())
+        self.assertEqual((event["event"], event["operation"], event["percent"]), ("transfer_progress", "upload", 100))
+        self.assertEqual((event["transferred_bytes"], event["total_bytes"]), (4, 4))
+        self.assertGreater(event["bytes_per_second"], 0)
+
+    def test_download_progress_callback_and_opt_out(self):
+        self.client.get_messages.return_value = fake_message(file=fake_file("file.bin"))
+        async def download(message, file, **options):
+            if "progress_callback" in options:
+                options["progress_callback"](4, 4)
+            file.write(b"data")
+            return file
+        self.client.download_media.side_effect = download
+        for flag in ("--progress", "--no-progress"):
+            self.errors.seek(0)
+            self.errors.truncate()
+            path = self.directory / (flag + ".bin")
+            self.assertEqual(self.main("download", "me", "42", "--output", str(path), flag, "--json"), 0)
+            self.assertEqual(path.read_bytes(), b"data")
+            if flag == "--progress":
+                self.assertEqual(json.loads(self.errors.getvalue())["operation"], "download")
+            else:
+                self.assertEqual(self.errors.getvalue(), "")
+
+
+class ProgressTests(unittest.TestCase):
+    def test_throttling_speed_completion_and_unknown_size(self):
+        args = SimpleNamespace(progress=True, json=True)
+        output = io.StringIO()
+        with redirect_stderr(output), patch("tg.time.monotonic", side_effect=[0, 1, 1.1, 2, 3]):
+            callback = tg.transfer_progress(args, "upload", "test.bin")
+            callback(10, 100)
+            callback(20, 100)
+            callback(100, 100)
+            callback(0, 0)
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([event["transferred_bytes"] for event in events], [10, 100, 0])
+        self.assertEqual([event["bytes_per_second"] for event in events], [10, 50, 0])
+        self.assertEqual([event["percent"] for event in events], [10, 100, None])
+
+    def test_album_fractional_progress_is_weighted_by_file_size(self):
+        args = SimpleNamespace(progress=True, json=True)
+        output = io.StringIO()
+        with redirect_stderr(output), patch("tg.time.monotonic", side_effect=[0, 1, 2, 3]):
+            callback = tg.transfer_progress(args, "upload", "album", [10, 90])
+            callback(0.5, 2)
+            callback(1.5, 2)
+            callback(2, 2)
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([event["transferred_bytes"] for event in events], [5, 55, 100])
+        self.assertEqual([event["percent"] for event in events], [5, 55, 100])
+
+    def test_terminal_default_opt_out_and_sanitized_text(self):
+        args = SimpleNamespace(progress=None, json=False)
+        with patch("tg.sys.stderr.isatty", return_value=False):
+            self.assertIsNone(tg.transfer_progress(args, "upload", "test"))
+        with patch("tg.sys.stderr.isatty", return_value=True), patch("builtins.print") as output:
+            callback = tg.transfer_progress(args, "upload", "test\x1b\u202e.bin")
+            callback(100, 100)
+            self.assertNotIn("\x1b", output.call_args.args[0])
+            self.assertNotIn("\u202e", output.call_args.args[0])
+            self.assertIn("100.0%", output.call_args.args[0])
+            self.assertIn("bytes/s", output.call_args.args[0])
+            args.progress = False
+            self.assertIsNone(tg.transfer_progress(args, "upload", "test"))
 
 
 class MediaTests(unittest.IsolatedAsyncioTestCase):

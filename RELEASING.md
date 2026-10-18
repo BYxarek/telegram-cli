@@ -33,7 +33,7 @@ python -m pip install -e . build twine
 python -X utf8 -m unittest discover -s tests -v
 python -m build
 python -m twine check --strict dist/*
-python scripts/check_distribution.py dist/telegram_cli_local-0.1.0-py3-none-any.whl
+python scripts/check_distribution.py dist/telegram_cli_local-0.2.0-py3-none-any.whl
 ```
 
 Use a clean `dist/` directory for each release to avoid uploading stale versions.
@@ -48,7 +48,7 @@ It needs access to PyPI to install the wheel's dependencies; it never accesses T
    under `Unreleased` for every change; move those entries into a versioned section for the release.
 3. Commit and push to `main`. Wait for the `Test, build, and publish` workflow to pass on Windows
    and Linux with Python 3.10 and 3.14, including the built-wheel installation check.
-4. Create a GitHub Release targeting that commit with a matching tag, initially `v0.1.0`, and publish it.
+4. Create a GitHub Release targeting that commit with a matching tag, for example `v0.2.0`, and publish it.
    Draft releases do not upload. The workflow rejects tags that differ from the package version.
 5. Check that the publish job succeeded and that https://pypi.org/project/telegram-cli-local/
    lists the expected version. Test `pipx install telegram-cli-local` on a clean machine.

@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 from contextlib import ExitStack
+from fnmatch import fnmatchcase
 from getpass import getpass
 from importlib.resources import files
 import json
@@ -102,10 +103,11 @@ Help works without configuration or a Telegram login.''')
             ("send", "Send text or a file with optional formatting", 'tcli send me --attach photo.jpg --caption "Hello!"'),
             ("edit", "Edit an outgoing message or attachment caption", 'tcli edit me 123 "Corrected text"'),
             ("download", "Download a message attachment to a new local file", 'tcli download me 123 --output photo.jpg'),
+            ("forward", "Forward a message or attachment between chats", 'tcli forward "Source chat" 123 me --json'),
             ("watch", "Follow new messages until Ctrl+C", 'tcli watch -- -1001234567890')):
         command = commands.add_parser(name, help=help_text, description=help_text,
                                        epilog=f"Example: {example}")
-        command.add_argument("chat", metavar="CHAT",
+        command.add_argument("chat", metavar="FROM_CHAT" if name == "forward" else "CHAT",
                              help="me, @username, exact chat name, or ID from tcli chats; use -- before negative IDs")
         command.add_argument("--json", action="store_true",
                              help="output JSON (watch: JSONL); errors are JSON on stderr")
@@ -114,10 +116,16 @@ Help works without configuration or a Telegram login.''')
                                  help="number of recent messages (default: 20)")
             page = command.add_mutually_exclusive_group()
             page.add_argument("--id", type=positive_int, metavar="ID", help="read one specific message; no search or media filter")
+            page.add_argument("--around", type=positive_int, metavar="ID", help="read a message and its surrounding conversation")
             page.add_argument("--before", type=positive_int, metavar="ID",
                                  help="read messages older than this message ID (exclusive)")
             command.add_argument("--search", metavar="QUERY", help="search message text using Telegram search")
             command.add_argument("--media", choices=MEDIA_FILTERS, help="filter attachments using Telegram search")
+            command.add_argument("--filename", metavar="PATTERN", help="case-insensitive filename glob, e.g. *.apk")
+            command.add_argument("--scan-limit", type=positive_int, metavar="N",
+                                 help="maximum messages to inspect with --filename (default: 1000)")
+            command.add_argument("--context", type=positive_int, metavar="N",
+                                 help="messages on each side of --around (default: 5)")
         elif name in ("send", "edit"):
             if name == "edit":
                 command.add_argument("message_id", type=positive_int, metavar="ID", help="outgoing message ID in this chat")
@@ -140,6 +148,12 @@ Help works without configuration or a Telegram login.''')
                                  help="new destination file; parent directory must exist; never overwrite")
             destination.add_argument("--output-dir", type=Path, metavar="DIR", help="existing destination directory; requires --album")
             command.add_argument("--album", action="store_true", help="download all attachments in the selected message's album")
+        elif name == "forward":
+            command.add_argument("message_id", type=positive_int, metavar="ID", help="message ID in the source chat")
+            command.add_argument("to_chat", metavar="TO_CHAT", help="destination chat selector")
+        if name in ("send", "download"):
+            command.add_argument("--progress", action=argparse.BooleanOptionalAction, default=None,
+                                 help="transfer progress on stderr (default: on in a terminal); JSON events with --json")
     help_command = commands.add_parser("help", help="Show general or command-specific help",
                                        description="Show help without connecting to Telegram.")
     help_command.add_argument("topic", nargs="?", metavar="COMMAND", help="command to explain, for example: send")
@@ -360,12 +374,43 @@ async def album_messages(client, chat, message):
                    if getattr(item, "grouped_id", None) == message.grouped_id), key=lambda item: item.id)
 
 
-async def download_attachment(client, message, path):
+def transfer_progress(args, operation, label, sizes=None):
+    if args.progress is False or (args.progress is None and not sys.stderr.isatty()):
+        return None
+    started = time.monotonic()
+    last = None
+
+    def update(current, total):
+        nonlocal last
+        if sizes is not None:
+            completed = min(int(current), len(sizes))
+            current = sum(sizes[:completed]) + (sizes[completed] * (current - completed) if completed < len(sizes) else 0)
+            total = sum(sizes)
+        now = time.monotonic()
+        if last is not None and now - last < 0.5 and current < total:
+            return
+        last = now
+        speed = current / max(now - started, 0.000001)
+        percent = min(100, 100 * current / total) if total > 0 else None
+        if args.json:
+            print(json.dumps({"event": "transfer_progress", "operation": operation, "file": str(label),
+                              "transferred_bytes": int(current), "total_bytes": total,
+                              "percent": percent, "bytes_per_second": speed}), file=sys.stderr, flush=True)
+        else:
+            percentage = f"{percent:.1f}%" if percent is not None else "unknown size"
+            print(f"{operation.title()} {safe_text(label)}: {int(current)}/{total} bytes "
+                  f"({percentage}), {speed:.0f} bytes/s", file=sys.stderr, flush=True)
+
+    return update
+
+
+async def download_attachment(client, message, path, progress_callback=None):
     if message.file is None:
         raise CommandError("no_attachment", "This message has no downloadable attachment.")
     with path.open("xb") as stream:
         try:
-            result = await client.download_media(message, file=stream)
+            options = {"progress_callback": progress_callback} if progress_callback is not None else {}
+            result = await client.download_media(message, file=stream, **options)
             if result is None:
                 raise CommandError("no_attachment", "This attachment cannot be downloaded.")
         except BaseException:
@@ -434,11 +479,21 @@ async def run(client, args):
                     options["search"] = args.search
                 if args.media is not None:
                     options["filter"] = MEDIA_FILTERS[args.media]()
-                if args.id is not None:
-                    message = await client.get_messages(chat, ids=args.id)
+                if args.id is not None or args.around is not None:
+                    message = await client.get_messages(chat, ids=args.id or args.around)
                     if message is None:
                         raise CommandError("message_not_found", "Message not found in this chat.")
                     messages = [message]
+                    if args.around is not None:
+                        context = args.context or 5
+                        older = await client.get_messages(chat, limit=context, offset_id=message.id)
+                        newer = await client.get_messages(chat, limit=context, min_id=message.id, reverse=True)
+                        messages = sorted([*older, message, *newer], key=lambda item: item.id, reverse=True)
+                elif args.filename is not None:
+                    scanned = await client.get_messages(chat, limit=args.scan_limit or 1000, **options)
+                    messages = [message for message in scanned
+                                if message.file is not None and message.file.name is not None
+                                and fnmatchcase(message.file.name.casefold(), args.filename.casefold())][:args.limit]
                 else:
                     messages = await client.get_messages(chat, limit=args.limit, **options)
                 if args.json:
@@ -457,6 +512,9 @@ async def run(client, args):
                 if args.attach is not None:
                     captions = (args.caption or []) + [""] * (len(args.attach) - len(args.caption or []))
                     if args.album:
+                        progress = transfer_progress(args, "upload", "album", [path.stat().st_size for path in args.attach])
+                        if progress is not None:
+                            options["progress_callback"] = progress
                         with ExitStack() as stack:
                             streams = [stack.enter_context(path.open("rb")) for path in args.attach]
                             messages = await client.send_file(chat, streams, caption=captions,
@@ -467,6 +525,9 @@ async def run(client, args):
                                 print(f"Message sent. ID: {message.id}")
                     else:
                         for path, caption in zip(args.attach, captions):
+                            progress = transfer_progress(args, "upload", path)
+                            if progress is not None:
+                                options["progress_callback"] = progress
                             with path.open("rb") as stream:
                                 message = await client.send_file(chat, stream, caption=caption,
                                                                  force_document=args.as_file, parse_mode=mode, **options)
@@ -480,6 +541,17 @@ async def run(client, args):
                         print(f"Message sent. ID: {message.id}")
                 if args.json:
                     print(json.dumps({"ok": True, "messages": [message_data(item) for item in args.sent_messages]}))
+            elif args.command == "forward":
+                destination = await resolve_chat(client, args.to_chat)
+                args.sent_messages = []
+                message = await client.forward_messages(destination, args.message_id, from_peer=chat)
+                if message is None:
+                    raise CommandError("message_not_found", "Message not found or cannot be forwarded.")
+                args.sent_messages.append(message)
+                if args.json:
+                    print(json.dumps({"ok": True, "messages": [message_data(message)]}))
+                else:
+                    print(f"Message forwarded. ID: {message.id}")
             elif args.command == "edit":
                 original = await client.get_messages(chat, ids=args.message_id)
                 if original is None:
@@ -512,7 +584,8 @@ async def run(client, args):
                     targets.append((item, path))
                 args.downloaded_files = []
                 for item, path in targets:
-                    args.downloaded_files.append(await download_attachment(client, item, path))
+                    args.downloaded_files.append(await download_attachment(
+                        client, item, path, transfer_progress(args, "download", path)))
                     if not args.json:
                         print(f"Downloaded: {safe_text(path.resolve())}")
                 if args.json:
@@ -559,8 +632,18 @@ def main():
         if args.command == "config":
             configure(config_path)
             return 0
-        if args.command == "read" and args.id is not None and (args.search is not None or args.media is not None):
-            raise ValueError("--id cannot be combined with --search or --media.")
+        if args.command == "read":
+            if (args.id is not None or args.around is not None) and any(
+                    value is not None for value in (args.search, args.media, args.filename, args.scan_limit)):
+                raise ValueError("--id and --around cannot be combined with search or media/filename filters.")
+            if args.context is not None and args.around is None:
+                raise ValueError("--context requires --around.")
+            if args.scan_limit is not None and args.filename is None:
+                raise ValueError("--scan-limit requires --filename.")
+            if args.filename is not None and not args.filename.strip():
+                raise ValueError("Filename pattern must not be empty.")
+        if args.command == "send" and args.attach is None and args.progress is not None:
+            raise ValueError("--progress and --no-progress require --attach.")
         if args.command == "download":
             if args.album != (args.output_dir is not None):
                 raise ValueError("--album requires --output-dir; --output-dir requires --album.")

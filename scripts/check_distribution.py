@@ -25,7 +25,8 @@ def main():
         settings.update(HOME=str(home), USERPROFILE=str(home), LOCALAPPDATA=str(root / "data"))
         executable = environment / ("Scripts/tcli.exe" if os.name == "nt" else "bin/tcli")
         settings["PATH"] = str(executable.parent)
-        for args in (["--help"], ["--version"], ["skills", "install", "--agent", "all"],
+        for args in (["--help"], ["--version"], ["read", "--help"], ["forward", "--help"],
+                     ["send", "--help"], ["download", "--help"], ["skills", "install", "--agent", "all"],
                      ["skills", "install", "--agent", "all"]):
             subprocess.run([str(executable), *args], check=True, cwd=root, env=settings)
         codex = home / ".agents" / "skills" / "telegram-cli" / "SKILL.md"

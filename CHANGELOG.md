@@ -5,9 +5,20 @@ move them into a versioned section when publishing a release.
 
 ## Unreleased
 
-### 2026-10-18
+No unreleased changes.
 
-#### Added
+## 0.2.0 - 2026-10-18
+
+### Added
+
+- Bounded, case-insensitive filename glob search with `read --filename` and `--scan-limit`.
+- Conversation context with `read --around ID --context N`, using history order even when IDs have gaps.
+- Native forwarding of messages and attachments with `forward FROM_CHAT ID TO_CHAT`, including JSON results.
+- Automatic terminal upload/download progress, explicit `--progress` / `--no-progress`, JSONL progress
+  events on stderr, byte counts, percentages, average transfer speed, and size-weighted album progress.
+- Offline regression tests for filename search, context, forwarding restrictions, progress throttling,
+  album byte accounting, and clean JSON stdout.
+- Include this changelog in source distributions and check new command help in clean wheel installations.
 
 - Upload local photos, videos, audio, and arbitrary binary documents (including
   `.exe`, `.apk`, and `.zip`) with `send --attach`; use `--as-file` to force document upload.
@@ -34,7 +45,7 @@ move them into a versioned section when publishing a release.
   ordered files and albums, validation, safe downloads, cancellation, and partial failures.
 - This changelog and a requirement to update it alongside future changes.
 
-#### Changed
+### Changed
 
 - Explain in both READMEs that the project was created specifically to help AI agents
   manage Telegram chats effectively.
@@ -45,7 +56,7 @@ move them into a versioned section when publishing a release.
   `~/.claude/skills/telegram-cli/SKILL.md` for Claude Code.
   Default installation still targets detected agents and backs up differing skills.
 
-#### Compatibility
+### Compatibility
 
 - `send --file` still sends UTF-8 file contents as text; `--attach` uploads binary files.
 - Existing `chats`/`read` JSON arrays and `watch` JSONL retain their shapes, with
