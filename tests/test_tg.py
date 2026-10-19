@@ -491,7 +491,7 @@ class CliTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]["text"], "")
         self.assertEqual(rows[1], {"id": 2, "chat_id": -1001, "date": "2026-01-01T00:00:00+00:00",
                                   "sender_id": 2, "out": False, "text": "Привет\n\x1b\u202e", "has_media": False,
-                                  "media": None, "reply_to_id": None, "grouped_id": None})
+                              "media": None, "reply_to_id": None, "grouped_id": None, "sender_name": None})
         self.assertNotIn("\x1b", output.getvalue())
         self.assertNotIn("\u202e", output.getvalue())
 

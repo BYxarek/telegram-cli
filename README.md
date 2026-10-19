@@ -52,6 +52,100 @@ are removed from displayed messages.
 One local account session, text and attachments, human-readable output, and optional JSON.
 Message deletion and a full-screen interface are not available.
 
+## Extended history and automation
+
+```console
+tcli capabilities
+tcli chats --search "work" --limit 10 --json
+tcli info "Chat" --json
+tcli read "Chat" --since 2026-10-01 --until 2026-10-08 --json
+tcli read "Chat" --after 123 --before 999 --from-user @username --json
+tcli read https://t.me/example/123 --json
+tcli pinned "Chat" --limit 20 --json
+tcli topics "Forum group" --limit 50 --json
+tcli read "Forum group" --topic 123 --json
+tcli thread "Chat" 123 --depth 10 --json
+tcli export "Chat" --since 2026-10-01 --until 2026-10-08 --output history.md --json
+tcli read "Chat" --after 123 --limit 1000 --jsonl
+tcli watch "Chat" --edits --json
+tcli send me "Quiet reminder" --silent
+tcli send me "Reminder" --schedule 2026-10-20T10:00:00+03:00 --json
+tcli scheduled me --json
+tcli scheduled me --cancel 123 --json
+tcli download "Chat" --batch --filename "*.zip" --limit 5 --max-bytes 104857600 --output-dir downloads --json
+tcli download "Chat" 123 --output archive.zip --resume --json
+```
+
+All IDs, recipients and paths above are examples. Sends, scheduling, cancellation, exports and
+downloads require an explicit user request; development and tests do not authorize live operations.
+
+- `--since` is inclusive and `--until` exclusive. Dates mean midnight UTC; timestamps require
+  a timezone offset or `Z`. `--after` and `--before` exclude their message IDs. Combine these with
+  text/media/filename filters. `--from-user` accepts `me`, an `@username`, or a known numeric user ID.
+  `--id`/`--around` exclude all these filters.
+- `chats --search` matches title substrings without case sensitivity; `--limit` counts matches.
+  It does not change exact-title chat selection or choose between duplicate titles.
+- `info` returns ID, name, type, username, description, forum status and current-account permissions.
+  User-chat permissions are null. Group/channel permissions summarize known rights, not a guarantee
+  that a particular message will be accepted by Telegram.
+- `read` accepts public `https://t.me/username/ID` and private `https://t.me/c/channel/ID` links
+  instead of CHAT, without `--id`, `--around`, `--before` or other history filters. Private links
+  do not grant access; the account must already have access. Invite, topic and comment links are unsupported.
+- Message JSON adds `sender_name` (nullable), from cached entities without per-message requests.
+  Human output includes the name alongside the numeric sender ID; outgoing messages still show `you`.
+- `pinned` returns up to `--limit` pinned messages, oldest first within the selected page.
+  `topics` lists forum topic IDs, titles, dates, top-message IDs, closed/pinned status and unread counts.
+  To continue a topics page, pass the final row's `id`, `top_message`, and `offset_date` as
+  `--before-topic`, `--offset-id`, and `--offset-date` together. Telegram controls topic ordering; offset_date is null if its source message is unavailable.
+  `read --topic ID` reads replies in that topic, excluding its starter. General (topic 1) is selected
+  locally from forum history, including ordinary replies and excluding other topic starters. Telegram ignores search filters
+  on reply requests, so `--topic` rejects `--search`, `--media` and `--from-user`; filename/date/ID filters work.
+- `thread` follows parents in the same chat, returning root-to-selected order. `--depth` bounds
+  the total number of messages. Missing parents, cross-chat replies, cycles and depth limits produce
+  a `thread_incomplete` notice on stderr; they never silently imply a complete conversation.
+- `export` writes selected history oldest first to a new UTF-8 Markdown file, with timestamps,
+  authors, quoted message bodies, attachment metadata and message links where available. The parent
+  directory must exist; existing files are never replaced. Attachments themselves are not exported.
+  It supports the history filters and `--limit` (default 1000). Output contains private conversation data.
+- `read --jsonl` streams one message per line, oldest first, without buffering the whole history.
+  Unlike ordinary `read`, `--limit` selects the oldest matches after the given bounds, not the latest.
+  Use the last emitted ID with `--after` for the next page. It excludes `--json`, `--id`, and `--around`.
+  Without `--after`, scanning starts at the beginning of history; date-only lower bounds can require
+  scanning older pages. Check the exit status: interrupted streams contain only partial results.
+  Errors and filename scan notices go to stderr as JSON; stdout contains only message rows.
+- Filename searches report `scan_limit_reached` on stderr when the bound is reached before enough
+  matches are found. An empty result does not prove the file is absent from the rest of the chat.
+- `watch --edits` combines Telegram edit updates with polling the latest 100 messages, so edits
+  from another CLI process sharing the session are detected too. With `--json`, every row adds
+  `event="new"|"edit"`; ordinary watch JSONL remains unchanged. Edits include message ID and full current
+  text, with duplicate updates suppressed. Intermediate edits between polls may be collapsed; older
+  edits require Telegram updates. There is no edit backfill across restarts or disconnected periods.
+- `send --silent` requests no notification sound. `--schedule` requires a future timestamp with
+  time and timezone; delivery is scheduled by Telegram, so the CLI need not remain running.
+  Both options work for text, individual files and albums. Telegram enforces scheduling limits.
+  A scheduling result confirms scheduling, not delivery. Inspect `scheduled CHAT` before retrying an
+  uncertain operation. Scheduled IDs differ from delivered message IDs.
+- `scheduled CHAT` lists scheduled messages in delivery-time order. `--cancel ID [ID ...]` verifies
+  that every requested ID is scheduled in that chat before requesting cancellation. It never deletes
+  delivered history. Telegram may deliver a message between listing and cancellation.
+- `download --batch` omits the positional message ID and requires an existing `--output-dir` and
+  `--max-bytes`. It supports history filters, filename scans and `--limit` (attachment count, default 20).
+  Selection is newest first. All selected sizes and destination collisions are checked before downloads;
+  exceeding the byte budget fails without downloading. Unknown sizes are rejected. Filenames use
+  message IDs and safe extensions, as with albums. Completed downloads survive a later failure.
+- `download --resume` works for single, album and batch downloads. It retains `.part` and `.part.json`
+  files after failure/cancellation, checks media identity, size and the partial file's SHA-256 before
+  appending, and publishes only a complete file without overwriting. Repeat a single-file command to continue.
+  For a partially completed album/batch, resume the failed ID with --output pointing to its ID-based
+  path, or narrow batch bounds to unfinished files; completed destinations still cause collision errors.
+  A `.part.lock` prevents concurrent resume operations; after a hard process crash, stop the old process
+  before removing its stale lock. Do not change partial files or manifests. Publication requires a
+  filesystem supporting hard links. Ordinary downloads still remove failed partial files.
+- `capabilities` outputs command/parameter metadata and JSON output descriptions without credentials,
+  file writes or network access. It describes parser options; the usage constraints above still apply.
+- SQLite locked/busy errors explain how to stop conflicting CLI processes and locate the session with
+  `doctor`; never delete the session or SQLite sidecars to resolve a lock.
+
 ## Installation
 
 Requires **Python 3.10+**, pip, and access to Telegram.

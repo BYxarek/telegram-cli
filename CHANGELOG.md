@@ -7,6 +7,34 @@ move them into a versioned section when publishing a release.
 
 No unreleased changes.
 
+## 0.3.0 - 2026-10-19
+
+### Changed
+
+- Reorganize all three repository Telegram CLI skills around task selection, current commands,
+  filtering/pagination, scheduling, resumable transfers, JSON events and authorization boundaries.
+  Keep repository maintenance separate from installing user skills.
+
+### Fixed
+
+- Detect edits from another CLI process sharing the account session by polling the latest 100
+  messages alongside Telegram edit updates. Suppress duplicate edit events and recover new-message
+  bursts larger than the polling window.
+- Stop dialog iteration as soon as a unique numeric chat ID matches, avoiding unnecessary API pages.
+
+### Added
+
+- History date, sender and ID bounds; chat-title substring search; public/private message-link reads.
+- Cached sender names, chat details and permissions, pinned messages, forum topic listing and reads,
+  bounded parent reply chains, and Markdown exports with available message links.
+- Streaming, paginated history JSONL and explicit filename scan-limit notices on stderr.
+- Optional live edit events in watch; silent and server-scheduled sending; scheduled-message listing
+  and explicit cancellation with scheduled-ID validation.
+- Bounded batch attachment downloads with byte-budget preflight and verified resumable transfers
+  using media identity, partial SHA-256 checks, exclusive locks and non-overwriting publication.
+- Offline machine-readable capabilities, actionable SQLite lock diagnostics, synchronized usage
+  documentation, CI checks for skill identity and fenced CLI examples, and offline regression tests.
+
 ## 0.2.1 - 2026-10-18
 
 ### Changed
