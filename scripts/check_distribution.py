@@ -26,6 +26,7 @@ def main():
         executable = environment / ("Scripts/tcli.exe" if os.name == "nt" else "bin/tcli")
         settings["PATH"] = str(executable.parent)
         for args in (["--help"], ["--version"], ["capabilities"], ["info", "--help"],
+                     ["sessions", "--json"], ["delete", "--help"], ["login", "--help"],
                      ["topics", "--help"], ["thread", "--help"], ["scheduled", "--help"],
                      ["pinned", "--help"], ["export", "--help"], ["read", "--help"], ["forward", "--help"],
                      ["send", "--help"], ["download", "--help"], ["skills", "install", "--agent", "all"],

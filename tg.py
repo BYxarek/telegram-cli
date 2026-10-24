@@ -1,4 +1,4 @@
-"""Telegram chats and messages from your terminal, using your personal account."""
+"""Telegram chats and messages from your terminal, using a user or bot account."""
 
 import argparse
 import asyncio
@@ -58,6 +58,14 @@ def positive_int(value):
     return number
 
 
+def session_name(value):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", value):
+        raise argparse.ArgumentTypeError("Use 1-32 lowercase letters, digits, underscores or hyphens for a session name.")
+    if value in {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(10)), *(f"lpt{i}" for i in range(10))}:
+        raise argparse.ArgumentTypeError("This session name is reserved on Windows.")
+    return value
+
+
 def timestamp(value):
     try:
         result = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -102,6 +110,7 @@ Use me, @username, an exact chat name, or a chat ID.
 For negative IDs, put -- before the ID: tcli read -- -1001234567890
 Help works without configuration or a Telegram login.''')
     cli.add_argument("--version", action="version", version=__version__)
+    cli.add_argument("--session", type=session_name, default="default", help="local session name (default: default)")
     commands = cli.add_subparsers(dest="command", title="commands", metavar="COMMAND")
     commands.add_parser("capabilities", help="Describe commands, parameters, and output formats as JSON, offline")
     skills = commands.add_parser("skills", help="Install or update bundled agent skills without Telegram access")
@@ -116,8 +125,11 @@ Help works without configuration or a Telegram login.''')
                          help="default: auto detects installed agents; explicit choices skip detection")
     commands.add_parser("config", help="Save API credentials locally",
                         description="Save or replace API_ID and API_HASH. No Telegram connection required.")
-    commands.add_parser("login", help="Sign in to your personal account",
-                        description="Sign in with your phone number, login code, and optional 2FA password.")
+    login = commands.add_parser("login", help="Sign in to a user or bot account",
+                        description="Sign in with phone/code/2FA, or --bot with a hidden bot token or TG_BOT_TOKEN.")
+    login.add_argument("--bot", action="store_true", help="sign in with a bot token; API_ID/API_HASH are still required")
+    sessions = commands.add_parser("sessions", help="List local session files offline; does not check authorization")
+    sessions.add_argument("--json", action="store_true", help="output session names and paths as JSON")
     commands.add_parser("logout", help="Revoke this CLI session",
                         description="Revoke this CLI session. API credentials are kept for your next login.")
     doctor = commands.add_parser("doctor", help="Check configuration and session without showing secrets")
@@ -133,6 +145,7 @@ Help works without configuration or a Telegram login.''')
             ("read", "Read recent messages, oldest first", 'tcli read "Chat name" --limit 10'),
             ("send", "Send text or a file with optional formatting", 'tcli send me --attach photo.jpg --caption "Hello!"'),
             ("edit", "Edit an outgoing message or attachment caption", 'tcli edit me 123 "Corrected text"'),
+            ("delete", "Delete specific messages for everyone after checking their chat", 'tcli delete me 123 124'),
             ("download", "Download a message attachment to a new local file", 'tcli download me 123 --output photo.jpg'),
             ("forward", "Forward a message or attachment between chats", 'tcli forward "Source chat" 123 me --json'),
             ("watch", "Follow new messages until Ctrl+C", 'tcli watch -- -1001234567890'),
@@ -199,6 +212,8 @@ Help works without configuration or a Telegram login.''')
                                  help="new destination file; parent directory must exist; never overwrite")
             destination.add_argument("--output-dir", type=Path, metavar="DIR", help="existing directory; requires --album or --batch")
             command.add_argument("--album", action="store_true", help="download all attachments in the selected message's album")
+        elif name == "delete":
+            command.add_argument("message_ids", type=positive_int, nargs="+", metavar="ID", help="only these IDs in this chat; irreversible")
         elif name == "forward":
             command.add_argument("message_id", type=positive_int, metavar="ID", help="message ID in the source chat")
             command.add_argument("to_chat", metavar="TO_CHAT", help="destination chat selector")
@@ -232,6 +247,9 @@ Help works without configuration or a Telegram login.''')
     help_command = commands.add_parser("help", help="Show general or command-specific help",
                                        description="Show help without connecting to Telegram.")
     help_command.add_argument("topic", nargs="?", metavar="COMMAND", help="command to explain, for example: send")
+    for command in commands.choices.values():
+        command.add_argument("--session", type=session_name, default=argparse.SUPPRESS,
+                             help="local session name; may also precede the command")
     return cli
 
 
@@ -477,8 +495,10 @@ def capabilities(cli):
                         "watch": "JSONL; --edits adds event=new|edit", "info": "object",
                         "pinned": "array", "topics": "array", "thread": "array", "scheduled": "array or cancellation result",
                         "send": "{ok,messages}", "edit": "{ok,message}", "forward": "{ok,messages}",
+                        "delete": "{ok,requested_ids}", "sessions": "array of {name,path}",
                         "download": "{ok,files}", "export": "{ok,path,count}", "errors": "stderr: {ok:false,error}"},
-            "constraints": ["Explicit permission is needed for sends, edits, forwards, scheduling and cancellation.",
+            "constraints": ["Explicit permission is needed for sends, edits, deletes, forwards, scheduling and cancellation.",
+                            "Bots cannot list dialogs or history; watch uses live updates only. See README for command restrictions.",
                             "JSONL can be partial on failure; check exit status.",
                             "Topic reads cannot combine with text/media/sender filters."]}
 
@@ -668,6 +688,8 @@ def transfer_progress(args, operation, label, sizes=None):
         return None
     started = time.monotonic()
     last = None
+    terminal = sys.stderr.isatty() and not args.json
+    label_text = safe_text(label).replace("\n", " ").replace("\t", " ")
 
     def update(current, total):
         nonlocal last
@@ -687,8 +709,15 @@ def transfer_progress(args, operation, label, sizes=None):
                               "percent": percent, "bytes_per_second": speed}), file=sys.stderr, flush=True)
         else:
             percentage = f"{percent:.1f}%" if percent is not None else "unknown size"
-            print(f"{operation.title()} {safe_text(label)}: {int(current)}/{total} bytes "
-                  f"({percentage}), {speed:.0f} bytes/s", file=sys.stderr, flush=True)
+            filled = int(percent / 5) if percent is not None else 0
+            bar = "#" * filled + "-" * (20 - filled)
+            line = (f"{operation.title()} [{bar}] {percentage}, {speed:.0f} bytes/s "
+                    f"{label_text}: {int(current)}/{total} bytes")
+            args.progress_active = terminal and not (total > 0 and current >= total)
+            if terminal:
+                width = max(1, shutil.get_terminal_size(fallback=(80, 24)).columns - 1)
+                line = "\r" + line[:width].ljust(width)
+            print(line, end="" if args.progress_active else "\n", file=sys.stderr, flush=True)
 
     return update
 
@@ -782,7 +811,13 @@ async def resume_attachment(client, message, path, progress_callback=None):
             "text": message.raw_text or "", "grouped_id": getattr(message, "grouped_id", None)}
 
 
-async def resolve_chat(client, value):
+async def resolve_chat(client, value, bot=False):
+    if bot:
+        if value == "me":
+            raise CommandError("bot_unsupported", "Bots have no Saved Messages. Use a chat ID or @username.")
+        if not value.startswith("@") and not re.fullmatch(r"-?\d+", value):
+            raise CommandError("bot_unsupported", "Bots cannot resolve chat titles. Use a known chat ID or @username.")
+        return await client.get_input_entity(int(value) if re.fullmatch(r"-?\d+", value) else value)
     if value == "me" or value.startswith("@"):
         return await client.get_input_entity(value)
     numeric = re.fullmatch(r"-?\d+", value)
@@ -803,22 +838,38 @@ async def run(client, args):
     try:
         await client.connect()
         if args.command == "login":
-            phone = input("Phone number with country code: ").strip()
-            if not re.fullmatch(r"\+\d{7,15}", phone):
-                raise ValueError("Enter an international phone number, for example +15551234567.")
-            await client.start(phone=phone,
-                               code_callback=lambda: getpass("Telegram login code: "),
-                               password=lambda: getpass("Two-factor authentication password: "))
+            existing = await client.get_me() if await client.is_user_authorized() else None
+            if existing is not None and existing.bot != args.bot:
+                raise CommandError("session_type_mismatch", "This session has a different account type. Choose another --session; no logout performed.")
+            if existing is None:
+                if args.bot:
+                    token = os.environ.get("TG_BOT_TOKEN") or getpass("Bot token (hidden input): ").strip()
+                    if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token):
+                        raise ValueError("Invalid bot token format. Obtain a token from BotFather.")
+                    await client.start(bot_token=token)
+                else:
+                    phone = input("Phone number with country code: ").strip()
+                    if not re.fullmatch(r"\+\d{7,15}", phone):
+                        raise ValueError("Enter an international phone number, for example +15551234567.")
+                    await client.start(phone=phone,
+                                       code_callback=lambda: getpass("Telegram login code: "),
+                                       password=lambda: getpass("Two-factor authentication password: "))
             me = await client.get_me()
-            if me.bot:
-                await client.log_out()
-                raise ValueError("A personal Telegram account is required; bot accounts are not supported.")
-            print(f"Signed in as {safe_text(me.first_name)} (ID {me.id}).")
+            if me.bot != args.bot:
+                raise CommandError("session_type_mismatch", "Account type does not match login mode; choose another --session.")
+            print(f"Signed in as {'bot' if me.bot else 'user'} {safe_text(me.first_name)} (ID {me.id}).")
             return
         if not await client.is_user_authorized():
             raise CommandError("unauthorized", "You are not signed in. Run: tcli login")
+        bot = await client.is_bot()
+        if bot and (args.command in ("chats", "export", "pinned", "topics", "scheduled") or
+                    (args.command == "read" and args.id is None) or
+                    (args.command == "download" and (args.batch or args.album)) or
+                    (args.command == "send" and args.schedule is not None)):
+            raise CommandError("bot_unsupported", "This command/mode requires a user session. Bots support read --id, single downloads and live watch; see README.")
         if args.command == "doctor":
             print("Telegram connection: OK\nSession authorization: OK")
+            print(f"Account type: {'bot' if bot else 'user'}")
         elif args.command == "logout":
             await client.log_out()
             print("CLI session revoked.")
@@ -839,7 +890,7 @@ async def run(client, args):
             if args.json:
                 print(json.dumps(dialogs))
         else:
-            chat = await resolve_chat(client, args.chat)
+            chat = await resolve_chat(client, args.chat, bot=bot)
             if getattr(args, "topic", None) is not None:
                 entity = await client.get_entity(chat)
                 if not getattr(entity, "forum", False):
@@ -921,7 +972,7 @@ async def run(client, args):
                 if args.json:
                     print(json.dumps({"ok": True, "messages": [message_data(item) for item in args.sent_messages]}))
             elif args.command == "forward":
-                destination = await resolve_chat(client, args.to_chat)
+                destination = await resolve_chat(client, args.to_chat, bot=bot)
                 args.sent_messages = []
                 message = await client.forward_messages(destination, args.message_id, from_peer=chat)
                 if message is None:
@@ -931,6 +982,18 @@ async def run(client, args):
                     print(json.dumps({"ok": True, "messages": [message_data(message)]}))
                 else:
                     print(f"Message forwarded. ID: {message.id}")
+            elif args.command == "delete":
+                ids = list(dict.fromkeys(args.message_ids))
+                messages = await client.get_messages(chat, ids=ids)
+                peer_id = await client.get_peer_id(chat)
+                if ({item.id for item in messages if item is not None} != set(ids) or
+                        any(item is None or item.chat_id != peer_id for item in messages)):
+                    raise CommandError("message_not_found", "Every ID must exist in the selected chat; nothing deleted.")
+                await client.delete_messages(chat, ids, revoke=True)
+                if args.json:
+                    print(json.dumps({"ok": True, "requested_ids": ids}))
+                else:
+                    print("Deletion request accepted for IDs: " + ", ".join(map(str, ids)))
             elif args.command == "edit":
                 original = await client.get_messages(chat, ids=args.message_id)
                 if original is None:
@@ -1050,6 +1113,28 @@ async def run(client, args):
                 else:
                     print(f"Exported {len(messages)} messages: {safe_text(args.output.resolve())}")
             elif args.command == "watch":
+                if bot:
+                    async def live(event):
+                        if args.json:
+                            data = message_data(event.message)
+                            if args.edits:
+                                data["event"] = "edit" if isinstance(event, events.MessageEdited.Event) else "new"
+                            print(json.dumps(data), flush=True)
+                        else:
+                            show_message(event.message)
+                        client.session.save()
+                    builders = [events.NewMessage(chats=chat)]
+                    if args.edits:
+                        builders.append(events.MessageEdited(chats=chat))
+                    for builder in builders:
+                        client.add_event_handler(live, builder)
+                    try:
+                        print("Watching live bot updates only. Press Ctrl+C to stop.", file=sys.stderr, flush=True)
+                        await client.run_until_disconnected()
+                    finally:
+                        for builder in builders:
+                            client.remove_event_handler(live, builder)
+                    return
                 def revision(message):
                     media = getattr(message, "document", None) or getattr(message, "photo", None)
                     return (getattr(message, "edit_date", None), message.raw_text,
@@ -1114,6 +1199,9 @@ async def run(client, args):
                     if args.edits:
                         client.remove_event_handler(edited, builder)
     finally:
+        if getattr(args, "progress_active", False):
+            print(file=sys.stderr, flush=True)
+            args.progress_active = False
         await client.disconnect()
 
 
@@ -1141,6 +1229,20 @@ def main():
             return 0
         session_dir = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "share") / "telegram-cli"
         config_path = session_dir / "config.json"
+        if args.command == "sessions":
+            paths = [("default", session_dir / "account.session")]
+            paths.extend((path.parent.name, path) for path in sorted((session_dir / "sessions").glob("*/account.session")))
+            rows = [{"name": name, "path": str(path)} for name, path in paths if path.is_file()]
+            if args.json:
+                print(json.dumps(rows))
+            else:
+                for row in rows:
+                    print(f"{safe_text(row['name'])}\t{safe_text(row['path'])}")
+            return 0
+        if args.session != "default":
+            session_dir = session_dir / "sessions" / args.session
+            if session_dir.is_symlink() or session_dir.parent.is_symlink():
+                raise ValueError("Session directories must not be symlinks.")
         if args.command == "config":
             configure(config_path)
             return 0

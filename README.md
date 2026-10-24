@@ -28,8 +28,8 @@ tcli watch "Work chat"        # Follow new messages
 ```
 
 `tcli` is a local Python CLI built with [Telethon](https://docs.telethon.dev/).
-It uses the Telegram API and acts as your personal account. You need your own
-`API_ID` and `API_HASH`; no bot token is used.
+It uses Telegram's MTProto API with a personal account or a bot. Both modes require your own
+`API_ID` and `API_HASH`; bot login additionally requires a BotFather token.
 
 ## Features
 
@@ -49,8 +49,63 @@ are removed from displayed messages.
 
 ### Current scope
 
-One local account session, text and attachments, human-readable output, and optional JSON.
-Message deletion and a full-screen interface are not available.
+Named local user/bot sessions, text and attachments, message deletion, human-readable output,
+and optional JSON. A full-screen interface is not available.
+
+## Sessions, bots and deletion
+
+```console
+tcli config
+tcli --session work login
+tcli --session assistant login --bot
+tcli sessions --json
+tcli --session work delete me 123 124 --json
+tcli --session assistant send @example_channel "Status update"
+tcli --session assistant watch @example_channel --edits --json
+```
+
+Examples are placeholders; do not execute sends or deletes without explicit authorization.
+`--session NAME` can precede or follow the command. Names contain 1-32 lowercase ASCII
+letters/digits, underscores or hyphens, starting with a letter/digit; Windows device names
+are rejected. `default` keeps the existing `account.session`. Other sessions live under
+`sessions/NAME/account.session` in the same local data directory. API configuration is shared;
+`config` updates it for all sessions. `sessions` lists local file presence offline, not account
+identity or authorization. `doctor --connect` shows the selected account type. `logout` revokes
+only the selected session. Use different session names for different accounts, and avoid
+concurrent processes on the same session. Choosing a new name does not copy existing authorization.
+
+`login --bot` reads a token via hidden input or `TG_BOT_TOKEN`, only during login. It does not
+store the token in config or accept it as a command-line argument. Existing authorized sessions
+are reused; login never switches accounts in place. A different account type requires another
+session name. Tokens and session files grant account access; never commit or share them.
+
+| Operation | Bot session |
+| --- | --- |
+| Send text/files/albums, forward, edit outgoing messages | Supported, subject to Telegram access and posting permissions |
+| Delete specific IDs | Supported within Telegram permissions; deleting others' messages may require admin rights |
+| `read --id`, `thread`, single `download` including `--resume`, `info` | Supported for accessible known messages/chats; Telegram may reject requests |
+| `watch`, `watch --edits` | Live MTProto events only; no history polling or replay guarantee after downtime |
+| `chats`, history reads/search/export, `pinned`, `topics`, `scheduled`, `send --schedule`, album/batch download | Rejected with `bot_unsupported` in this CLI |
+| Chat selectors | Known numeric ID or `@username`; titles and `me` are rejected |
+
+A bot has no Saved Messages and cannot initiate private conversations with arbitrary users:
+the user must first contact it or add it to a group. Groups/channels must grant the necessary
+rights. Group privacy mode affects incoming updates. A numeric peer must already be known to
+the selected session, usually from an update; a raw ID alone does not supply an access hash.
+This uses Telethon/MTProto, not the HTTP Bot API; HTTP Bot API file-size limits are not CLI limits.
+See [Telegram's bot FAQ](https://core.telegram.org/bots/faq),
+[history restriction](https://core.telegram.org/method/messages.getHistory), and
+[known-message retrieval](https://core.telegram.org/method/messages.getMessages).
+
+`delete CHAT ID [ID ...]` deletes for everyone (`revoke=True`), without an extra prompt.
+All requested messages are fetched and checked against the selected chat before any deletion;
+a missing ID or a different chat aborts the operation. Duplicate IDs are removed. This check
+is necessary because [Telethon does not validate the chat for deletion](https://docs.telethon.dev/en/stable/modules/client.html#telethon.client.messages.MessageMethods.delete_messages).
+JSON success is `{ok:true,requested_ids:[...]}`: Telegram accepted the request, but does not
+provide per-ID proof of deletion. Telegram determines permissions and message restrictions.
+Large sets may use several server requests and partially succeed before a failure; an uncertain
+network result is not proof that nothing was deleted. Deletion cannot be undone. Scheduled
+messages still use `scheduled --cancel`, not `delete`.
 
 ## Extended history and automation
 
@@ -309,7 +364,9 @@ the CLI displays metadata. Deletion and inline media playback are not supported.
 | Command | Purpose |
 | --- | --- |
 | `tcli config` | Save or replace API credentials |
-| `tcli login` | Sign in to your personal account |
+| `tcli login` | Sign in to a user account; add `--bot` for a bot |
+| `tcli sessions --json` | List local named session files offline |
+| `tcli delete CHAT ID [ID ...]` | Delete the selected messages for everyone |
 | `tcli chats --limit 100` | List up to 100 chats; default: 50 |
 | `tcli read "Chat" --limit 20` | Read recent messages; default: 20 |
 | `tcli send "Chat" "Text"` | Send one plain-text message |
@@ -461,11 +518,36 @@ Upload/download progress is enabled automatically when stderr is a terminal. `--
 it when redirected; `--no-progress` disables it. These flags apply to attachment sends and downloads.
 Progress includes transferred/total bytes, percentage, and average bytes per second; album upload
 progress is weighted by local file sizes. Updates are throttled to twice per second, plus completion.
+Human output includes a bar such as `[##########----------] 50.0%`. In a terminal it redraws
+in place; redirected output uses separate lines. Unknown sizes have an empty bar without a percentage.
 With `--json`, stderr receives JSONL events with `event="transfer_progress"`, `operation`, `file`,
 `transferred_bytes`, `total_bytes`, `percent` (null for unknown/zero size), and `bytes_per_second`.
 Errors are still JSON objects on stderr; distinguish them from progress by `ok=false`.
 Stdout contains only the final result. Progress measures transfer work, not confirmed delivery;
 cached uploads may produce no progress events.
+
+### Performance
+
+Install the optional native encryption accelerator from a source checkout:
+
+```console
+python -m pip install -e ".[fast]"
+python scripts/benchmark_crypto.py
+```
+
+Telethon automatically uses `cryptg` when installed, reducing encryption/decryption CPU work
+without changing message handling. The offline benchmark compares the existing fallback with
+cryptg on synthetic data and checks identical ciphertext and successful decryption; its speedup
+is for AES only, not end-to-end Telegram throughput. The base installation remains usable without it.
+See [Telethon's transfer FAQ](https://docs.telethon.dev/en/stable/quick-references/faq.html#file-download-is-slow-or-sending-files-takes-too-long).
+
+For faster workflows, forward existing Telegram attachments instead of downloading and uploading
+them again, use `--jsonl` for large history reads, and apply server-side date/sender/media filters
+before filename matching. Keep filename scan bounds as small as the task allows. Disable progress
+with `--no-progress` when measuring transfer speed. Avoid concurrent CLI processes on one session.
+Parallel transfers need separate measurement and careful FloodWait handling; they are not enabled.
+Resumable downloads already use Telethon's maximum default request size (512 KiB).
+Plain text has no byte-transfer callback: the CLI reports the confirmed message ID after sending.
 
 ### Text formatting
 
@@ -633,7 +715,8 @@ Increase `--limit` if your chat is not in the first page.
 **Telegram asks you to wait?** Wait for the reported FloodWait period.
 After a connection failure, check recent history before retrying a send to avoid duplicates.
 
-**Can I use a bot?** This CLI supports personal accounts only.
+**Can I use a bot?** Yes: use a separate `--session NAME` and `login --bot`. See the capabilities
+and restrictions under [Sessions, bots and deletion](#sessions-bots-and-deletion).
 
 **Can I still run the Python file?** Yes: `python tg.py ...` from the project root
 with dependencies installed uses the same commands.

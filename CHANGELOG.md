@@ -7,6 +7,19 @@ move them into a versioned section when publishing a release.
 
 No unreleased changes.
 
+## 0.4.0 - 2026-10-25
+
+### Added
+
+- Add `delete CHAT ID...` with full chat-membership preflight and revoke-for-everyone semantics.
+- Add named `--session` selection and offline `sessions` listing, preserving the existing default session.
+- Support hidden-token bot login, direct bot peer resolution and live event-based bot watch;
+  reject unsupported bot modes with actionable errors and document capabilities and restrictions.
+- Add a percentage bar that redraws in terminals for uploads, albums and downloads, keeping
+  redirected output line-based and JSON progress unchanged. End interrupted bars before errors.
+- Add the optional `fast` extra with native cryptg encryption and an offline correctness/speed
+  benchmark, plus workflow performance guidance in both READMEs.
+
 ## 0.3.0 - 2026-10-19
 
 ### Changed

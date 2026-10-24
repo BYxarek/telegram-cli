@@ -44,7 +44,7 @@ class HelpTests(unittest.TestCase):
         self.assertTrue(all(output == outputs[0] for output in outputs))
 
     def test_command_help_matches_help_flag(self):
-        for topic in ("config", "login", "logout", "doctor", "chats", "read", "send", "edit", "download", "forward", "watch", "skills", "help"):
+        for topic in ("config", "login", "logout", "doctor", "sessions", "delete", "chats", "read", "send", "edit", "download", "forward", "watch", "skills", "help"):
             with self.subTest(topic=topic):
                 result = self.command("help", topic)
                 flag = self.command(topic, "--help")
@@ -379,11 +379,14 @@ class FakeClient:
         self.connect = AsyncMock()
         self.disconnect = AsyncMock()
         self.is_user_authorized = AsyncMock(return_value=True)
+        self.is_bot = AsyncMock(return_value=False)
         self.get_input_entity = AsyncMock(return_value="self")
+        self.get_peer_id = AsyncMock(return_value=1)
         self.send_message = AsyncMock(return_value=fake_message(42))
         self.send_file = AsyncMock(return_value=fake_message(43))
         self.edit_message = AsyncMock(return_value=fake_message(42))
         self.forward_messages = AsyncMock(return_value=fake_message(44))
+        self.delete_messages = AsyncMock(return_value=[])
         self.download_media = AsyncMock()
         self.get_messages = AsyncMock(return_value=[])
         self.start = AsyncMock()
@@ -583,18 +586,18 @@ class CliTests(unittest.IsolatedAsyncioTestCase):
             await tg.run(client, tg.parser().parse_args(["watch", "me"]))
         client.disconnect.assert_awaited_once()
 
-    async def test_login_logout_and_bot_rejection(self):
+    async def test_login_logout_and_bot_type_protection(self):
         for bot in (False, True):
             client = FakeClient()
             client.get_me.return_value.bot = bot
             with patch("builtins.input", return_value="+15551234567"), patch("builtins.print"):
                 if bot:
-                    with self.assertRaisesRegex(ValueError, "personal"):
+                    with self.assertRaisesRegex(ValueError, "different account type"):
                         await tg.run(client, tg.parser().parse_args(["login"]))
-                    client.log_out.assert_awaited_once()
+                    client.log_out.assert_not_awaited()
                 else:
                     await tg.run(client, tg.parser().parse_args(["login"]))
-                    client.start.assert_awaited_once()
+                    client.start.assert_not_awaited()
             client.disconnect.assert_awaited_once()
         client = FakeClient()
         with patch("builtins.print"):
@@ -604,9 +607,42 @@ class CliTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_phone_does_not_login(self):
         client = FakeClient()
+        client.is_user_authorized.return_value = False
         with patch("builtins.input", return_value="invalid"), self.assertRaisesRegex(ValueError, "international"):
             await tg.run(client, tg.parser().parse_args(["login"]))
         client.start.assert_not_awaited()
+        client.disconnect.assert_awaited_once()
+
+    async def test_new_user_and_bot_login(self):
+        for bot in (False, True):
+            client = FakeClient()
+            client.is_user_authorized.return_value = False
+            client.get_me.return_value.bot = bot
+            with patch("builtins.input", return_value="+15551234567"), \
+                    patch("tg.getpass", return_value="123:synthetic_token"), patch.dict(os.environ, {}, clear=True), \
+                    patch("builtins.print"):
+                await tg.run(client, tg.parser().parse_args(["login", *(["--bot"] if bot else [])]))
+            if bot:
+                client.start.assert_awaited_once_with(bot_token="123:synthetic_token")
+            else:
+                self.assertEqual(client.start.await_args.kwargs["phone"], "+15551234567")
+            client.disconnect.assert_awaited_once()
+
+    async def test_bot_watch_uses_events_without_history_and_removes_handlers(self):
+        client = FakeClient()
+        client.is_bot.return_value = True
+        client.add_event_handler, client.remove_event_handler = Mock(), Mock()
+        async def emit():
+            callback = client.add_event_handler.call_args_list[0].args[0]
+            await callback(SimpleNamespace(message=fake_message(12)))
+        client.run_until_disconnected = AsyncMock(side_effect=emit)
+        output = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(io.StringIO()):
+            await tg.run(client, tg.parser().parse_args(["watch", "@chat", "--edits", "--json"]))
+        self.assertEqual(json.loads(output.getvalue())["event"], "new")
+        self.assertEqual(client.add_event_handler.call_count, 2)
+        self.assertEqual(client.remove_event_handler.call_count, 2)
+        client.get_messages.assert_not_awaited()
         client.disconnect.assert_awaited_once()
 
 
@@ -628,6 +664,95 @@ class MainTests(unittest.TestCase):
     def main(self, *args):
         with patch("sys.argv", ["tcli", *args]):
             return tg.main()
+
+    def test_session_selection_preserves_default_and_shared_config(self):
+        for options, suffix in ((("--session", "work", "send", "me", "text"), "sessions/work/account"),
+                                (("send", "me", "text", "--session", "other"), "sessions/other/account"),
+                                (("send", "me", "text"), "account")):
+            self.assertEqual(self.main(*options), 0)
+            self.assertEqual(Path(self.factory.call_args.args[0]), self.directory / "telegram-cli" / suffix)
+
+    def test_sessions_listing_is_offline_and_does_not_create_files(self):
+        with patch.dict(os.environ, {"TG_API_HASH": "invalid"}):
+            self.assertEqual(self.main("sessions", "--json"), 0)
+        self.assertEqual(json.loads(self.output.getvalue()), [])
+        self.assertFalse((self.directory / "telegram-cli").exists())
+        for suffix in ("account.session", "sessions/work/account.session"):
+            path = self.directory / "telegram-cli" / suffix
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        self.output.seek(0)
+        self.output.truncate()
+        self.assertEqual(self.main("sessions", "--json"), 0)
+        self.assertEqual([row["name"] for row in json.loads(self.output.getvalue())], ["default", "work"])
+        self.factory.assert_not_called()
+
+    def test_invalid_session_names_and_delete_ids_rejected_offline(self):
+        for name in ("../escape", "a/b", "CON", "con", "", "x" * 33):
+            with self.assertRaises(SystemExit):
+                self.main("--session", name, "sessions")
+        for ids in ((), ("0",), ("-1",)):
+            with self.assertRaises(SystemExit):
+                self.main("delete", "me", *ids)
+        self.factory.assert_not_called()
+
+    def test_delete_validates_entire_chat_before_revoking_and_deduplicates(self):
+        from telethon.tl.types import InputPeerSelf
+        peer = InputPeerSelf()
+        self.client.get_input_entity.return_value = peer
+        self.client.get_messages.return_value = [fake_message(7), fake_message(8)]
+        self.assertEqual(self.main("delete", "me", "7", "8", "7", "--json"), 0)
+        self.client.get_messages.assert_awaited_once_with(peer, ids=[7, 8])
+        self.client.delete_messages.assert_awaited_once_with(peer, [7, 8], revoke=True)
+        self.client.get_peer_id.assert_awaited_once_with(peer)
+        self.assertEqual(json.loads(self.output.getvalue()), {"ok": True, "requested_ids": [7, 8]})
+
+    def test_delete_rejects_missing_and_cross_chat_messages(self):
+        from telethon.tl.types import InputPeerUser
+        self.client.get_input_entity.return_value = InputPeerUser(1, 2)
+        for messages in ([fake_message(7), None], [fake_message(7), fake_message(8, chat_id=2)]):
+            self.client.get_messages.return_value = messages
+            self.assertEqual(self.main("delete", "me", "7", "8", "--json"), 1)
+        self.client.delete_messages.assert_not_awaited()
+
+    def test_bot_restrictions_fail_before_history_or_sends(self):
+        self.client.is_bot.return_value = True
+        for args in (("chats",), ("read", "@chat"), ("pinned", "@chat"), ("topics", "@chat"),
+                     ("scheduled", "@chat"), ("send", "me", "text"), ("send", "Title", "text"),
+                     ("send", "@chat", "text", "--schedule", "2099-01-01T00:00:00Z"),
+                     ("download", "@chat", "7", "--album", "--output-dir", str(self.directory)),
+                     ("download", "@chat", "--batch", "--max-bytes", "10", "--output-dir", str(self.directory)),
+                     ("export", "@chat", "--output", str(self.directory / "history.md"))):
+            self.errors.seek(0)
+            self.errors.truncate()
+            self.assertEqual(self.main(*args, "--json"), 1)
+            self.assertEqual(json.loads(self.errors.getvalue())["error"]["code"], "bot_unsupported")
+        self.client.get_messages.assert_not_awaited()
+        self.client.send_message.assert_not_awaited()
+
+    def test_bot_send_and_known_message_read_use_direct_entity_resolution(self):
+        self.client.is_bot.return_value = True
+        self.assertEqual(self.main("send", "123", "text", "--json"), 0)
+        self.client.get_input_entity.assert_awaited_once_with(123)
+        self.client.get_messages.return_value = fake_message(7)
+        self.assertEqual(self.main("read", "@chat", "--id", "7", "--json"), 0)
+
+    def test_invalid_bot_token_never_reaches_telegram_or_output(self):
+        self.client.is_user_authorized.return_value = False
+        with patch.dict(os.environ, {"TG_BOT_TOKEN": "sensitive-invalid-token"}):
+            self.assertEqual(self.main("login", "--bot"), 1)
+        self.client.start.assert_not_awaited()
+        self.assertNotIn("sensitive-invalid-token", self.output.getvalue() + self.errors.getvalue())
+
+    def test_bot_environment_token_login_is_not_saved_or_printed(self):
+        self.client.is_user_authorized.return_value = False
+        self.client.get_me.return_value.bot = True
+        with patch.dict(os.environ, {"TG_BOT_TOKEN": "123:synthetic_token"}), patch("tg.getpass") as prompt:
+            self.assertEqual(self.main("--session", "assistant", "login", "--bot"), 0)
+        prompt.assert_not_called()
+        self.client.start.assert_awaited_once_with(bot_token="123:synthetic_token")
+        self.assertNotIn("synthetic_token", self.output.getvalue() + self.errors.getvalue())
+        self.assertFalse((self.directory / "telegram-cli" / "config.json").exists())
 
     def test_send_file_and_stdin_preserve_multiline_text(self):
         text = "Привет\n**literal**\n"
@@ -1069,8 +1194,51 @@ class MainTests(unittest.TestCase):
             else:
                 self.assertEqual(self.errors.getvalue(), "")
 
+    def test_failed_upload_ends_terminal_progress_before_error(self):
+        path = self.directory / "file.bin"
+        path.write_bytes(b"data")
+        async def upload(chat, stream, **options):
+            options["progress_callback"](2, 4)
+            raise OSError("Upload failed")
+        self.client.send_file.side_effect = upload
+        with patch("tg.sys.stderr.isatty", return_value=True):
+            self.assertEqual(self.main("send", "me", "--attach", str(path)), 1)
+        self.assertIn("50.0%", self.errors.getvalue())
+        self.assertIn("\nError: Upload failed", self.errors.getvalue())
+        self.client.disconnect.assert_awaited_once()
+
 
 class ProgressTests(unittest.TestCase):
+    def test_terminal_bar_redraws_and_finishes_on_newline(self):
+        args = SimpleNamespace(progress=True, json=False)
+        output = io.StringIO()
+        with redirect_stderr(output), patch("tg.sys.stderr.isatty", return_value=True), \
+                patch("tg.time.monotonic", side_effect=[0, 1, 2]), \
+                patch("tg.shutil.get_terminal_size", return_value=os.terminal_size((80, 24))):
+            callback = tg.transfer_progress(args, "upload", "very-long-name" * 20)
+            callback(50, 100)
+            self.assertTrue(args.progress_active)
+            self.assertIn("[##########----------] 50.0%", output.getvalue())
+            self.assertNotIn("\n", output.getvalue())
+            callback(100, 100)
+        self.assertFalse(args.progress_active)
+        self.assertTrue(output.getvalue().endswith("\n"))
+        self.assertIn("[####################] 100.0%", output.getvalue())
+        self.assertTrue(all(len(line.rstrip("\n")) <= 79 for line in output.getvalue().split("\r")))
+
+    def test_redirected_bar_uses_lines_without_terminal_controls(self):
+        args = SimpleNamespace(progress=True, json=False)
+        output = io.StringIO()
+        with redirect_stderr(output), patch("tg.sys.stderr.isatty", return_value=False), \
+                patch("tg.time.monotonic", side_effect=[0, 1, 2]):
+            callback = tg.transfer_progress(args, "download", "test\nfile")
+            callback(25, 100)
+            callback(0, 0)
+        self.assertNotIn("\r", output.getvalue())
+        self.assertEqual(len(output.getvalue().splitlines()), 2)
+        self.assertIn("[#####---------------] 25.0%", output.getvalue())
+        self.assertIn("unknown size", output.getvalue())
+
     def test_throttling_speed_completion_and_unknown_size(self):
         args = SimpleNamespace(progress=True, json=True)
         output = io.StringIO()

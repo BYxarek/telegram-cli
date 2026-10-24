@@ -1,12 +1,12 @@
 ---
 name: telegram-cli
-description: Use the personal-account Telegram CLI (tcli) for chat discovery, filtered history, topics, reply chains, exports, messages and attachments, scheduling, live updates, JSON automation, and account diagnostics.
+description: Use Telegram CLI (tcli) with named user or bot sessions for messages, attachments, deletion, history, live updates, JSON automation and diagnostics.
 ---
 
 # Telegram CLI
 
-Use the installed `tcli` command from any directory. It acts as the user's personal Telegram account,
-not a bot. Respond in the user's language; CLI output and these instructions are English.
+Use the installed `tcli` command from any directory with a user or bot account.
+Respond in the user's language; CLI output and these instructions are English.
 Do not infer a repository path from the skill's installation directory.
 
 ## Choose the command
@@ -34,6 +34,10 @@ If unavailable, inspect `tcli help`; do not assume newer commands exist based on
 | Observe future messages and edits | `tcli watch "Chat" --edits --json` |
 | Send literal text | `tcli send me "Text" --json` |
 | Edit outgoing text or an attachment caption | `tcli edit me 123 "Corrected text" --json` |
+| Delete specific messages for everyone | `tcli delete me 123 124 --json` |
+| List local session files offline | `tcli sessions --json` |
+| Sign in to a named user session | `tcli --session work login` |
+| Sign in to a separate bot session | `tcli --session assistant login --bot` |
 | Forward with attribution | `tcli forward "Source" 123 "Destination" --json` |
 | Inspect pending scheduled messages | `tcli scheduled me --json` |
 | Cancel specific scheduled messages | `tcli scheduled me --cancel 123 124 --json` |
@@ -48,10 +52,39 @@ All example names, IDs, links and paths are placeholders. Resolve actual targets
 Use `read` for one-time requests; start `watch` only for ongoing observation.
 Use `thread` for the parent chain and `--around` for chronological neighbors; these are different views.
 
+## Sessions, bots and deletion
+
+Select the authorized account with `--session NAME` before or after the command; default is `default`.
+Do not assume a different named session belongs to the same person or bot. `sessions --json` lists
+local file presence only, without checking identity or authorization; `doctor --connect` shows user/bot type.
+Names use 1-32 lowercase ASCII letters/digits, underscores or hyphens, starting with letter/digit.
+The default keeps the old account.session; others use sessions/NAME/account.session in the data directory.
+API configuration is shared. Logout affects only the selected session. Do not copy or delete session files.
+
+`login --bot` prompts locally with hidden input or reads TG_BOT_TOKEN. API_ID/API_HASH are still required.
+Never collect bot tokens in chat or put them in command arguments. Existing login is reused;
+changing account/type requires another session name. Never log out an unrelated account to switch.
+Bots use MTProto, not HTTP Bot API. Bot capabilities in this CLI:
+
+- Send text/files/albums, forward, edit outgoing messages and delete specified IDs within Telegram permissions.
+- Read known IDs (`read --id`), follow `thread`, single download/resume and info, subject to access.
+- Watch live new/edit events only; no history polling or replay guarantee. Privacy mode affects group events.
+- No chats list, title selection, Saved Messages (`me`), history/search/export, pinned/topics/scheduled commands,
+  send --schedule, album/batch download. These modes fail with bot_unsupported.
+- Use a known numeric chat ID or @username. A raw ID without a cached entity/access hash may fail.
+  Bots cannot initiate arbitrary private conversations; users must contact/add the bot first.
+
+`delete CHAT ID [ID ...]` is irreversible, deletes for everyone and has no extra prompt.
+Execute only for the user's explicitly authorized session, chat and IDs. The CLI checks every ID
+belongs to the selected chat before deleting; missing or mismatched IDs abort without deletion.
+`{ok:true,requested_ids:[...]}` means the server accepted the request, not proof for each ID.
+Large requests can partially succeed; after uncertain failure inspect accessible IDs before retrying.
+Use scheduled --cancel for pending scheduled IDs, not delete.
+
 ## Authorization and private data
 
 - Read only the chats and history needed for the user's request. A request to read or develop the CLI
-  does not authorize sends, forwards, edits, scheduling or cancellation, including in Saved Messages.
+  does not authorize sends, forwards, edits, deletes, scheduling or cancellation, including in Saved Messages.
 - For a write, use the user's authorized recipient, content and message ID where applicable. Existing
   unambiguous authorization remains valid; do not ask for the same permission again. Clarify a genuinely
   ambiguous recipient, time or action before executing that part.
@@ -270,6 +303,8 @@ JSON contains resulting plain text, not formatting entities or the original Mark
 | `download` | {ok:true,files:[...]} |
 | `export` | {ok:true,path,count} |
 | `scheduled --cancel` | {ok:true,cancelled_ids:[...]} |
+| `delete` | {ok:true,requested_ids:[...]} |
+| `sessions` | Array of {name,path}; file presence only |
 
 Download file records contain message_id, chat_id, absolute path, text (caption), grouped_id.
 Errors with `--json` or `read --jsonl` go to stderr as {ok:false,error:{code,message,retry_after,...}}.

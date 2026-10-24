@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telegram-cli-local"
-description = "Telegram CLI for a personal account"
+description = "Telegram CLI for user and bot accounts with named sessions"
 readme = "README.md"
 requires-python = ">=3.10"
 dynamic = ["version", "dependencies"]
@@ -24,6 +24,9 @@ classifiers = [
 
 [project.scripts]
 tcli = "tg:main"
+
+[project.optional-dependencies]
+fast = ["cryptg>=0.5.2,<0.7"]
 
 [project.urls]
 Repository = "https://github.com/BYxarek/telegram-cli"
