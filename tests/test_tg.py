@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 import json
 import os
@@ -671,7 +672,8 @@ class CliTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient()
         client.is_user_authorized.return_value = False
         qr = SimpleNamespace(url="tg://login?token=synthetic", recreate=AsyncMock(),
-                             wait=AsyncMock(side_effect=[TimeoutError(), tg.errors.SessionPasswordNeededError(None)]))
+                             wait=AsyncMock(side_effect=[asyncio.TimeoutError(),
+                                                        tg.errors.SessionPasswordNeededError(None)]))
         client.qr_login.return_value = qr
         with patch("tg.sys.stdout.isatty", return_value=True), patch("tg.QRCode") as image, \
                 patch("tg.getpass", return_value="synthetic_password"), patch("builtins.print"):
