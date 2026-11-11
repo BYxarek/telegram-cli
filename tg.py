@@ -8,6 +8,9 @@ from contextlib import ExitStack
 from fnmatch import fnmatchcase
 from getpass import getpass
 from importlib.resources import files
+import inspect
+import io
+from itertools import islice
 import json
 import os
 from pathlib import Path
@@ -23,9 +26,10 @@ from http.client import HTTPException
 from urllib.request import Request, urlopen
 from urllib.parse import urlsplit
 
-from telethon import TelegramClient, events, utils
+from qrcode import QRCode
+from telethon import TelegramClient, errors, events, helpers, utils
 from telethon.errors import FloodWaitError, RPCError
-from telethon.tl import types, functions
+from telethon.tl import custom, types, functions
 from tcli_skills import __version__
 
 
@@ -39,6 +43,68 @@ class CommandError(ValueError):
     def __init__(self, code, message):
         super().__init__(message)
         self.error_code = code
+
+
+class UploadClient(TelegramClient):
+    async def upload_file(self, file, *, part_size_kb=None, file_size=None, file_name=None,
+                          use_cache=None, key=None, iv=None, progress_callback=None):
+        part_size = 512 * 1024
+        # shortcut: pipeline seekable CLI attachments, extend when another input type needs parallel upload.
+        if (isinstance(file, (io.BufferedReader, io.BytesIO)) and isinstance(getattr(file, "name", None), str)
+                and file.seekable() and file.tell() == 0 and file_size is None and part_size_kb is None
+                and file_name is None and key is None and iv is None):
+            file_size = file.seek(0, os.SEEK_END)
+            file.seek(0)
+            if file_size > part_size:
+                return await self.upload_parts(file, file_size, part_size, progress_callback)
+        return await super().upload_file(file, part_size_kb=part_size_kb, file_size=file_size,
+                                         file_name=file_name, use_cache=use_cache, key=key, iv=iv,
+                                         progress_callback=progress_callback)
+
+    async def upload_parts(self, file, size, part_size, progress_callback):
+        file_id = helpers.generate_random_long()
+        part_count = (size + part_size - 1) // part_size
+        big = size > 10 * 1024 * 1024
+        digest = None if big else hashlib.md5()
+
+        async def save_part(index, data):
+            if big:
+                request = functions.upload.SaveBigFilePartRequest(file_id, index, part_count, data)
+            else:
+                request = functions.upload.SaveFilePartRequest(file_id, index, data)
+            if not await self(request):
+                raise CommandError("upload_failed", f"Telegram rejected upload block {index + 1} of {part_count}.")
+            return len(data)
+
+        parts = iter(range(part_count))
+        pending = set()
+        sent = 0
+        try:
+            while sent < size:
+                for index in islice(parts, 4 - len(pending)):
+                    length = min(part_size, size - index * part_size)
+                    data = file.read(length)
+                    if len(data) != length or (index == part_count - 1 and file.read(1)):
+                        raise CommandError("file_changed", "The attachment size changed during upload.")
+                    if digest is not None:
+                        digest.update(data)
+                    pending.add(asyncio.create_task(save_part(index, data)))
+                done, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                sent += sum(task.result() for task in done)
+                pending.difference_update(done)
+                if progress_callback is not None:
+                    result = progress_callback(sent, size)
+                    if inspect.isawaitable(result):
+                        await result
+        finally:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        name = os.path.basename(file.name)
+        if big:
+            return types.InputFileBig(file_id, part_count, name)
+        return custom.InputSizedFile(file_id, part_count, name, md5=digest, size=size)
 
 
 class CLIParser(argparse.ArgumentParser):
@@ -126,8 +192,10 @@ Help works without configuration or a Telegram login.''')
     commands.add_parser("config", help="Save API credentials locally",
                         description="Save or replace API_ID and API_HASH. No Telegram connection required.")
     login = commands.add_parser("login", help="Sign in to a user or bot account",
-                        description="Sign in with phone/code/2FA, or --bot with a hidden bot token or TG_BOT_TOKEN.")
-    login.add_argument("--bot", action="store_true", help="sign in with a bot token; API_ID/API_HASH are still required")
+                        description="Sign in with phone/code, --qr, or --bot. API_ID/API_HASH are required.")
+    login_modes = login.add_mutually_exclusive_group()
+    login_modes.add_argument("--bot", action="store_true", help="sign in with a hidden bot token or TG_BOT_TOKEN")
+    login_modes.add_argument("--qr", action="store_true", help="scan a terminal QR code from an already signed-in Telegram mobile app")
     sessions = commands.add_parser("sessions", help="List local session files offline; does not check authorization")
     sessions.add_argument("--json", action="store_true", help="output session names and paths as JSON")
     commands.add_parser("logout", help="Revoke this CLI session",
@@ -834,6 +902,79 @@ async def resolve_chat(client, value, bot=False):
     return matches[0]
 
 
+async def login_user_by_phone(client):
+    phone = input("Phone number with country code: ").strip()
+    if not re.fullmatch(r"\+[0-9]{7,15}", phone):
+        raise ValueError("Enter an international phone number, for example +15551234567.")
+    request = functions.auth.SendCodeRequest(phone, client.api_id, client.api_hash, types.CodeSettings())
+    for attempt in range(3):
+        try:
+            sent = await client(request)
+            break
+        except errors.AuthRestartError:
+            if attempt == 2:
+                raise
+
+    if isinstance(sent, types.auth.SentCodePaymentRequired):
+        raise CommandError("login_code_unavailable", "Telegram requires payment for code delivery. Try tcli login --qr.")
+    if isinstance(sent, types.auth.SentCodeSuccess):
+        return
+    delivery = sent.type
+    if isinstance(delivery, types.auth.SentCodeTypeApp):
+        destination = "the service chat named Telegram on an already signed-in device"
+    elif isinstance(delivery, (types.auth.SentCodeTypeSms, types.auth.SentCodeTypeSmsWord,
+                               types.auth.SentCodeTypeSmsPhrase)):
+        destination = "SMS"
+    elif isinstance(delivery, types.auth.SentCodeTypeCall):
+        destination = "a phone call"
+    elif isinstance(delivery, types.auth.SentCodeTypeEmailCode):
+        destination = f"email ({safe_text(delivery.email_pattern)})"
+    elif isinstance(delivery, types.auth.SentCodeTypeFragmentSms):
+        destination = f"Fragment ({safe_text(delivery.url)})"
+    else:
+        channel = type(delivery).__name__.removeprefix("SentCodeType")
+        raise CommandError("login_code_unavailable",
+                           f"Telegram requires {channel} verification. Try tcli login --qr.")
+    print(f"Telegram sent the login code via {destination}. If it doesn't arrive, try tcli login --qr.",
+          file=sys.stderr, flush=True)
+
+    for attempt in range(3):
+        code = getpass("Telegram login code: ").strip()
+        if code:
+            try:
+                if isinstance(delivery, types.auth.SentCodeTypeEmailCode):
+                    result = await client(functions.auth.SignInRequest(
+                        phone, sent.phone_code_hash, email_verification=types.EmailVerificationCode(code)))
+                    if isinstance(result, types.auth.AuthorizationSignUpRequired):
+                        raise CommandError("login_signup_required", "Create the account in the Telegram app first.")
+                else:
+                    await client.sign_in(phone, code=code, phone_code_hash=sent.phone_code_hash)
+                return
+            except (errors.PhoneCodeEmptyError, errors.PhoneCodeInvalidError, errors.CodeInvalidError):
+                pass
+            except (errors.PhoneCodeExpiredError, errors.PhoneCodeHashEmptyError) as error:
+                raise CommandError("login_code_expired", "Request a new code with tcli login or use tcli login --qr.") from error
+        if attempt < 2:
+            print("Invalid code. Please try again.", file=sys.stderr)
+    raise CommandError("login_code_invalid", "Three invalid code entries. Run tcli login again or use tcli login --qr.")
+
+
+async def login_user_by_qr(client):
+    if not sys.stdout.isatty():
+        raise CommandError("terminal_required", "Run tcli login --qr directly in an interactive terminal.")
+    qr = await client.qr_login()
+    while True:
+        print("On your phone, open Telegram > Settings > Devices > Link Desktop Device and scan:")
+        image = QRCode()
+        image.add_data(qr.url)
+        image.print_ascii(tty=True)
+        try:
+            await qr.wait()
+            return
+        except asyncio.TimeoutError:
+            await qr.recreate()
+
+
 async def run(client, args):
     try:
         await client.connect()
@@ -848,13 +989,27 @@ async def run(client, args):
                         raise ValueError("Invalid bot token format. Obtain a token from BotFather.")
                     await client.start(bot_token=token)
                 else:
-                    phone = input("Phone number with country code: ").strip()
-                    if not re.fullmatch(r"\+\d{7,15}", phone):
-                        raise ValueError("Enter an international phone number, for example +15551234567.")
-                    await client.start(phone=phone,
-                                       code_callback=lambda: getpass("Telegram login code: "),
-                                       password=lambda: getpass("Two-factor authentication password: "))
+                    try:
+                        if args.qr:
+                            await login_user_by_qr(client)
+                        else:
+                            await login_user_by_phone(client)
+                    except errors.SessionPasswordNeededError:
+                        for attempt in range(3):
+                            password = getpass("Two-factor authentication password: ")
+                            if password:
+                                try:
+                                    await client.sign_in(password=password)
+                                    break
+                                except errors.PasswordHashInvalidError:
+                                    if attempt == 2:
+                                        raise
+                            elif attempt == 2:
+                                raise ValueError("A two-factor authentication password is required.")
+                            print("Invalid password. Please try again.", file=sys.stderr)
             me = await client.get_me()
+            if me is None:
+                raise CommandError("unauthorized", "Telegram did not authorize this session. Try tcli login again.")
             if me.bot != args.bot:
                 raise CommandError("session_type_mismatch", "Account type does not match login mode; choose another --session.")
             print(f"Signed in as {'bot' if me.bot else 'user'} {safe_text(me.first_name)} (ID {me.id}).")
@@ -1336,8 +1491,8 @@ def main():
                 print("Use tcli doctor --connect to check Telegram connectivity and authorization.")
                 return 0
         session_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        client = TelegramClient(str(session_dir / "account"), api_id, api_hash,
-                                flood_sleep_threshold=0)
+        client = UploadClient(str(session_dir / "account"), api_id, api_hash,
+                              flood_sleep_threshold=0)
         asyncio.run(run(client, args))
     except KeyboardInterrupt:
         if getattr(args, "json", False):

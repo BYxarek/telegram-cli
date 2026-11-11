@@ -7,6 +7,12 @@ move them into a versioned section when publishing a release.
 
 No unreleased changes.
 
+## 0.5.0 - 2026-11-11
+
+- Show the delivery method chosen by Telegram during phone login.
+- Add `login --qr` for sign-in with an already authorized Telegram mobile app.
+- Pipeline up to four upload blocks per attachment to reduce time spent waiting for Telegram.
+
 ## 0.4.0 - 2026-10-25
 
 ### Added

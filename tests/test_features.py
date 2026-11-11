@@ -1,6 +1,7 @@
 """Offline contract tests for history, metadata, scheduling and safe transfers."""
 import asyncio
 import argparse
+import hashlib
 import io
 import json
 import sqlite3
@@ -375,6 +376,97 @@ class RpcTests(unittest.IsolatedAsyncioTestCase):
 
 class TransferTests(unittest.IsolatedAsyncioTestCase):
     execute = HistoryTests.execute
+
+    async def test_send_file_pipelines_parts_and_waits_for_all_acknowledgements(self):
+        client = tg.UploadClient(None, 12345, "synthetic")
+        peer = tg.types.InputPeerSelf()
+        block_size = 512 * 1024
+        for full_parts in (5, 20):
+            with self.subTest(full_parts=full_parts), TemporaryDirectory() as directory:
+                data = b"".join(bytes([index]) * block_size for index in range(full_parts)) + b"tail"
+                path = Path(directory) / "sample.bin"
+                path.write_bytes(data)
+                progress = []
+                saved = {}
+                first_window = asyncio.Event()
+                fifth_started = asyncio.Event()
+                active = peak = 0
+                big = full_parts == 20
+
+                async def rpc(request):
+                    nonlocal active, peak
+                    if isinstance(request, tg.functions.messages.SendMediaRequest):
+                        handle = request.media.file
+                        self.assertEqual(len(saved), full_parts + 1)
+                        self.assertEqual(handle.parts, len(saved))
+                        self.assertEqual(handle.name, path.name)
+                        self.assertEqual(b"".join(saved[index].bytes for index in range(handle.parts)), data)
+                        self.assertEqual({part.file_id for part in saved.values()}, {handle.id})
+                        if big:
+                            self.assertIsInstance(handle, tg.types.InputFileBig)
+                            self.assertTrue(all(part.file_total_parts == handle.parts for part in saved.values()))
+                        else:
+                            self.assertEqual(handle.md5_checksum, hashlib.md5(data).hexdigest())
+                        return object()
+
+                    method = tg.functions.upload.SaveBigFilePartRequest if big else tg.functions.upload.SaveFilePartRequest
+                    self.assertIsInstance(request, method)
+                    index = request.file_part
+                    active += 1
+                    peak = max(peak, active)
+                    if active == 4:
+                        first_window.set()
+                    if index == 4:
+                        fifth_started.set()
+                    await first_window.wait()
+                    if index == 0:
+                        await fifth_started.wait()
+                    saved[index] = request
+                    active -= 1
+                    return True
+
+                with path.open("rb") as stream, patch.object(tg.UploadClient, "__call__", side_effect=rpc), \
+                        patch.object(client, "get_input_entity", AsyncMock(return_value=peer)), \
+                        patch.object(client, "_get_response_message", return_value=fake_message(43)):
+                    message = await asyncio.wait_for(client.send_file(
+                        peer, stream, force_document=True, progress_callback=lambda sent, total: progress.append((sent, total))
+                    ), timeout=5)
+                self.assertEqual(message.id, 43)
+                self.assertEqual(peak, 4)
+                self.assertEqual(progress[-1], (len(data), len(data)))
+                self.assertEqual(progress, sorted(set(progress)))
+
+    async def test_upload_failure_cancels_pending_parts_without_sending_media(self):
+        client = tg.UploadClient(None, 12345, "synthetic")
+        peer = tg.types.InputPeerSelf()
+        ready = asyncio.Event()
+        started = []
+        cancelled = []
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "sample.bin"
+            path.write_bytes(b"x" * (5 * 512 * 1024))
+
+            async def rpc(request):
+                self.assertIsInstance(request, tg.functions.upload.SaveFilePartRequest)
+                index = request.file_part
+                started.append(index)
+                if len(started) == 4:
+                    ready.set()
+                if index == 0:
+                    await ready.wait()
+                    raise tg.FloodWaitError(request, capture=15)
+                try:
+                    await asyncio.Future()
+                finally:
+                    cancelled.append(index)
+
+            with path.open("rb") as stream, patch.object(tg.UploadClient, "__call__", side_effect=rpc), \
+                    patch.object(client, "get_input_entity", AsyncMock(return_value=peer)):
+                with self.assertRaises(tg.FloodWaitError) as error:
+                    await asyncio.wait_for(client.send_file(peer, stream, force_document=True), timeout=5)
+        self.assertEqual(error.exception.seconds, 15)
+        self.assertEqual(started, [0, 1, 2, 3])
+        self.assertCountEqual(cancelled, [1, 2, 3])
 
     async def test_batch_limits_and_preflight_before_writes(self):
         with TemporaryDirectory() as directory:

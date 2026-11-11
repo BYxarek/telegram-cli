@@ -96,7 +96,7 @@ class SkillsTests(unittest.TestCase):
     def test_install_both_is_offline_and_idempotent(self):
         with patch.dict(os.environ, {}, clear=True), patch("sys.argv", ["tcli", "skills", "install"]), \
                 patch("tg.sys.stdout.reconfigure"), patch("tg.sys.stderr.reconfigure"), \
-                patch("tg.TelegramClient") as client, patch("tg.agent_installed", return_value=True):
+                patch("tg.UploadClient") as client, patch("tg.agent_installed", return_value=True):
             self.assertEqual(tg.main(), 0)
             client.assert_not_called()
         tg.install_skills("all")
@@ -354,7 +354,7 @@ class ConfigTests(unittest.TestCase):
                 patch("tg.sys.stdout.reconfigure"), patch("tg.sys.stderr.reconfigure"), \
                 patch("builtins.input", return_value="12345"), \
                 patch("tg.getpass", return_value="a" * 32), \
-                patch("builtins.print"), patch("tg.TelegramClient") as client:
+                patch("builtins.print"), patch("tg.UploadClient") as client:
             self.assertEqual(tg.main(), 0)
         client.assert_not_called()
         self.assertEqual(tg.load_credentials(self.path), (12345, "a" * 32))
@@ -390,10 +390,17 @@ class FakeClient:
         self.download_media = AsyncMock()
         self.get_messages = AsyncMock(return_value=[])
         self.start = AsyncMock()
+        self.api_id, self.api_hash = 12345, "synthetic_hash"
+        self.request = AsyncMock()
+        self.sign_in = AsyncMock()
+        self.qr_login = AsyncMock()
         self.get_me = AsyncMock(return_value=SimpleNamespace(bot=False, first_name="User", id=1))
         self.log_out = AsyncMock()
         self.is_connected = Mock(return_value=False)
         self.session = SimpleNamespace(save=Mock())
+
+    async def __call__(self, request):
+        return await self.request(request)
 
     async def iter_dialogs(self, **kwargs):
         for dialog in self.dialogs:
@@ -610,7 +617,7 @@ class CliTests(unittest.IsolatedAsyncioTestCase):
         client.is_user_authorized.return_value = False
         with patch("builtins.input", return_value="invalid"), self.assertRaisesRegex(ValueError, "international"):
             await tg.run(client, tg.parser().parse_args(["login"]))
-        client.start.assert_not_awaited()
+        client.request.assert_not_awaited()
         client.disconnect.assert_awaited_once()
 
     async def test_new_user_and_bot_login(self):
@@ -618,15 +625,62 @@ class CliTests(unittest.IsolatedAsyncioTestCase):
             client = FakeClient()
             client.is_user_authorized.return_value = False
             client.get_me.return_value.bot = bot
+            client.request.return_value = tg.types.auth.SentCode(
+                tg.types.auth.SentCodeTypeApp(5), "synthetic_code_hash")
+            secret = "123:synthetic_token" if bot else "12345"
+            errors = io.StringIO()
             with patch("builtins.input", return_value="+15551234567"), \
-                    patch("tg.getpass", return_value="123:synthetic_token"), patch.dict(os.environ, {}, clear=True), \
-                    patch("builtins.print"):
+                    patch("tg.getpass", return_value=secret), patch.dict(os.environ, {}, clear=True), \
+                    redirect_stdout(io.StringIO()), redirect_stderr(errors):
                 await tg.run(client, tg.parser().parse_args(["login", *(["--bot"] if bot else [])]))
             if bot:
                 client.start.assert_awaited_once_with(bot_token="123:synthetic_token")
             else:
-                self.assertEqual(client.start.await_args.kwargs["phone"], "+15551234567")
+                client.request.assert_awaited_once()
+                self.assertEqual(client.request.await_args.args[0].phone_number, "+15551234567")
+                client.sign_in.assert_awaited_once_with("+15551234567", code="12345", phone_code_hash="synthetic_code_hash")
+                self.assertIn("service chat named Telegram", errors.getvalue())
             client.disconnect.assert_awaited_once()
+
+    async def test_phone_login_does_not_prompt_for_firebase_sms(self):
+        client = FakeClient()
+        client.is_user_authorized.return_value = False
+        client.request.return_value = tg.types.auth.SentCode(
+            tg.types.auth.SentCodeTypeFirebaseSms(5), "synthetic_code_hash")
+        with patch("builtins.input", return_value="+15551234567"), patch("tg.getpass") as prompt:
+            with self.assertRaisesRegex(tg.CommandError, r"FirebaseSms.*login --qr"):
+                await tg.run(client, tg.parser().parse_args(["login"]))
+        prompt.assert_not_called()
+
+    async def test_email_login_submits_email_verification_code(self):
+        client = FakeClient()
+        client.is_user_authorized.return_value = False
+        client.request.side_effect = [
+            tg.types.auth.SentCode(tg.types.auth.SentCodeTypeEmailCode("a***@example.com", 5), "synthetic_hash"),
+            Mock(),
+        ]
+        with patch("builtins.input", return_value="+15551234567"), patch("tg.getpass", return_value="12345"), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()) as stderr:
+            await tg.run(client, tg.parser().parse_args(["login"]))
+        self.assertIn("a***@example.com", stderr.getvalue())
+        sign_in = client.request.await_args.args[0]
+        self.assertEqual(sign_in.email_verification.code, "12345")
+        self.assertEqual(sign_in.phone_code_hash, "synthetic_hash")
+
+    async def test_qr_login_refreshes_expired_token_and_accepts_two_factor_password(self):
+        client = FakeClient()
+        client.is_user_authorized.return_value = False
+        qr = SimpleNamespace(url="tg://login?token=synthetic", recreate=AsyncMock(),
+                             wait=AsyncMock(side_effect=[TimeoutError(), tg.errors.SessionPasswordNeededError(None)]))
+        client.qr_login.return_value = qr
+        with patch("tg.sys.stdout.isatty", return_value=True), patch("tg.QRCode") as image, \
+                patch("tg.getpass", return_value="synthetic_password"), patch("builtins.print"):
+            await tg.run(client, tg.parser().parse_args(["login", "--qr"]))
+        qr.recreate.assert_awaited_once()
+        self.assertEqual(qr.wait.await_count, 2)
+        self.assertEqual(image.return_value.print_ascii.call_count, 2)
+        client.sign_in.assert_awaited_once_with(password="synthetic_password")
+        client.disconnect.assert_awaited_once()
 
     async def test_bot_watch_uses_events_without_history_and_removes_handlers(self):
         client = FakeClient()
@@ -659,7 +713,7 @@ class MainTests(unittest.TestCase):
         self.output.reconfigure = lambda **kwargs: None
         self.errors.reconfigure = lambda **kwargs: None
         self.client = FakeClient()
-        self.factory = self.stack.enter_context(patch("tg.TelegramClient", return_value=self.client))
+        self.factory = self.stack.enter_context(patch("tg.UploadClient", return_value=self.client))
 
     def main(self, *args):
         with patch("sys.argv", ["tcli", *args]):

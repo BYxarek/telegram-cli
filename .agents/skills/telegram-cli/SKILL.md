@@ -43,7 +43,7 @@ If unavailable, inspect `tcli help`; do not assume newer commands exist based on
 | Cancel specific scheduled messages | `tcli scheduled me --cancel 123 124 --json` |
 | Download one attachment | `tcli download me 123 --output archive.zip --json` |
 | Configure API credentials locally | `tcli config` |
-| Sign in interactively in the user's terminal | `tcli login` |
+| Sign in interactively in the user's terminal | `tcli login` or `tcli login --qr` |
 | Check local setup, optionally connectivity | `tcli doctor` or `tcli doctor --connect` |
 | End this CLI session when requested | `tcli logout` |
 | Refresh supported agent skills offline | `tcli skills install --agent all` |
@@ -55,6 +55,8 @@ Use `thread` for the parent chain and `--around` for chronological neighbors; th
 ## Sessions, bots and deletion
 
 Select the authorized account with `--session NAME` before or after the command; default is `default`.
+Phone login reports where Telegram sent the code. If it does not arrive, run `tcli login --qr`
+in a terminal and scan it in Telegram mobile under Settings > Devices > Link Desktop Device.
 Do not assume a different named session belongs to the same person or bot. `sessions --json` lists
 local file presence only, without checking identity or authorization; `doctor --connect` shows user/bot type.
 Names use 1-32 lowercase ASCII letters/digits, underscores or hyphens, starting with letter/digit.

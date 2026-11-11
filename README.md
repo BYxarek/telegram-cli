@@ -301,6 +301,10 @@ tcli login
 It does not connect to Telegram. Run it again to replace credentials; invalid input leaves existing settings intact.
 
 `login` asks for your international phone number, Telegram login code, and 2FA password if enabled.
+The CLI displays the delivery method chosen by Telegram. If Telegram sends an in-app code,
+open the service chat named **Telegram** on an already signed-in device.
+If the code does not arrive, run `tcli login --qr` in a terminal and scan the QR code in the
+Telegram mobile app under **Settings → Devices → Link Desktop Device**.
 Code and password input is hidden. The session is saved for later commands.
 
 ### 3. Read and send
@@ -364,7 +368,7 @@ the CLI displays metadata. Deletion and inline media playback are not supported.
 | Command | Purpose |
 | --- | --- |
 | `tcli config` | Save or replace API credentials |
-| `tcli login` | Sign in to a user account; add `--bot` for a bot |
+| `tcli login` | Sign in by phone or with `--qr`; use `--bot` for a bot |
 | `tcli sessions --json` | List local named session files offline |
 | `tcli delete CHAT ID [ID ...]` | Delete the selected messages for everyone |
 | `tcli chats --limit 100` | List up to 100 chats; default: 50 |
@@ -545,7 +549,9 @@ For faster workflows, forward existing Telegram attachments instead of downloadi
 them again, use `--jsonl` for large history reads, and apply server-side date/sender/media filters
 before filename matching. Keep filename scan bounds as small as the task allows. Disable progress
 with `--no-progress` when measuring transfer speed. Avoid concurrent CLI processes on one session.
-Parallel transfers need separate measurement and careful FloodWait handling; they are not enabled.
+For local attachments larger than 512 KiB, `send --attach` keeps up to four 512 KiB blocks
+in flight over one Telegram connection. This also applies to individual files in an album.
+Progress counts acknowledged bytes, and the CLI submits the message after all its blocks are saved.
 Resumable downloads already use Telethon's maximum default request size (512 KiB).
 Plain text has no byte-transfer callback: the CLI reports the confirmed message ID after sending.
 
