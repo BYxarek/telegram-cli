@@ -44,7 +44,7 @@ It uses Telegram's MTProto API with a personal account or a bot. Both modes requ
 - **AI agent skills:** CLI usage instructions for Codex and Claude Code.
 
 Reading history does not mark messages as read. Outgoing text is literal by default;
-use `--format markdown` or `--format html` for formatting. Terminal control characters
+use `--format markdown`, `--format markdownv2` or `--format html` for formatting. Terminal control characters
 are removed from displayed messages.
 
 ### Current scope
@@ -85,7 +85,7 @@ session name. Tokens and session files grant account access; never commit or sha
 | Delete specific IDs | Supported within Telegram permissions; deleting others' messages may require admin rights |
 | `read --id`, `thread`, single `download` including `--resume`, `info` | Supported for accessible known messages/chats; Telegram may reject requests |
 | `watch`, `watch --edits` | Live MTProto events only; no history polling or replay guarantee after downtime |
-| `chats`, history reads/search/export, `pinned`, `topics`, `scheduled`, `send --schedule`, album/batch download | Rejected with `bot_unsupported` in this CLI |
+| `chats`, history reads/search/export, `pinned`, `topics`, `scheduled`, `send --schedule`, album forwarding, album/batch download | Rejected with `bot_unsupported` in this CLI |
 | Chat selectors | Known numeric ID or `@username`; titles and `me` are rejected |
 
 A bot has no Saved Messages and cannot initiate private conversations with arbitrary users:
@@ -154,7 +154,8 @@ downloads require an explicit user request; development and tests do not authori
   `--before-topic`, `--offset-id`, and `--offset-date` together. Telegram controls topic ordering; offset_date is null if its source message is unavailable.
   `read --topic ID` reads replies in that topic, excluding its starter. General (topic 1) is selected
   locally from forum history, including ordinary replies and excluding other topic starters. Telegram ignores search filters
-  on reply requests, so `--topic` rejects `--search`, `--media` and `--from-user`; filename/date/ID filters work.
+  on reply requests, so `--topic` rejects `--search`, server media filters and `--from-user`.
+  Filename, date, ID and local media filters work.
 - `thread` follows parents in the same chat, returning root-to-selected order. `--depth` bounds
   the total number of messages. Missing parents, cross-chat replies, cycles and depth limits produce
   a `thread_incomplete` notice on stderr; they never silently imply a complete conversation.
@@ -352,17 +353,35 @@ tcli download me 123 --output photo.jpg
 
 `--attach` uploads one or more existing local files in order, including binary documents such as `.exe`, `.apk`, and `.zip`. Telethon selects the media representation;
 `--as-file` forces a document. Telegram enforces supported formats and file size limits.
-`--caption` and `--as-file` require `--attach`. `--file` still sends UTF-8 file contents as text.
+`--caption` works with `--attach` and `--media-json`. `--as-file` requires `--attach`.
+`--file` sends UTF-8 file contents as text.
+
+```console
+tcli send me --attach note.ogg --attachment-type voice --duration 5
+tcli send me --attach clip.mp4 --attachment-type video-note --duration 5 --dimensions 384 384
+tcli send me --attach sticker.webp --attachment-type sticker --sticker-emoji "🙂"
+tcli send me --attach a.jpg b.jpg --album --media-spoiler --caption "<b>First</b>" --caption "||Second||" --caption-format html --caption-format markdownv2
+tcli send @recipient --attach private.jpg --view-once
+```
+
+`--attachment-type` accepts `photo`, `video`, `audio`, `voice`, `video-note`, `animation`,
+`sticker` and `document`. It sets Telegram media attributes and uploads the supplied file.
+Use a file already encoded for the chosen type. `--duration`, `--dimensions`, `--streaming`,
+`--thumbnail` and `--cover` supply media metadata where applicable. `--ttl` and
+`--view-once` require a compatible single attachment and chat. Telegram checks permissions,
+encoding, expiry and album compatibility. Ordinary attachments keep the existing automatic type.
 `read` and `watch` show attachment type, filename (when available), MIME type, size, and caption.
 Their JSON includes `media`: null or an object with `type`, `name`, `mime_type`, `size` (bytes),
 `ext`, `width`, `height`, and `duration` (seconds); unavailable fields are null.
-Other media, such as link previews, can have `has_media=true` with `media=null`.
+Other media, such as polls, can have `has_media=true` with `media=null` and a structured
+`media_payload`. Message JSON also carries `entities`, `service`, `reply_markup`, `reply_to`,
+`forward` and `rich_message` when present.
 
 Use a real message ID from the selected chat with `download`. `--output` is an explicit file path;
 its parent must exist. Existing files are never overwritten, remote filenames never determine
 local paths, and failed or cancelled downloads remove the partial file.
 Photos download as stored by Telegram. Open the downloaded file in a local application to view it;
-the CLI displays metadata. Deletion and inline media playback are not supported.
+the CLI displays metadata. The terminal output does not play media.
 
 
 | Command | Purpose |
@@ -436,7 +455,9 @@ Search follows Telegram's text-search rules; it is not a local filename or exten
 
 `edit CHAT ID` changes the text or attachment caption of an outgoing message.
 Use exactly one text source: positional text, `--stdin`, or `--file PATH`, with optional
-`--format plain|markdown|html`. Empty text is rejected. Attachments themselves are not replaced.
+`--format plain|markdown|markdownv2|html`. Use `--clear-caption` to remove an attachment caption.
+Use `edit CHAT ID --attach PATH` or `--media-json PATH` to replace media. Supply `--caption`
+to update the caption in the same edit. Telegram enforces media replacement rules and edit rights.
 Telegram enforces edit permissions and time limits; an unchanged message may return an RPC error.
 
 ### Multiple files and albums
@@ -450,6 +471,7 @@ tcli download me 123 --album --output-dir downloads --json
 Without `--album`, files are sent individually in the supplied order. Repeat `--caption`
 for each file in order; omitted captions are empty (use `--caption ""` to skip a caption).
 All files are checked before connecting. `--reply-to`, `--format`, and `--as-file` apply to all.
+Repeat `--caption-format` to override the format for individual captions in attachment order.
 `--album` sends 2-10 attachments as one group through Telethon. Use compatible Telegram album
 media; Telegram may reject incompatible combinations. A single caption belongs to the first item.
 
@@ -503,7 +525,10 @@ tcli download me 123 --output archive.zip --progress --json
 messages inspected (default: 1000, after any Telegram search/media filters); `--limit` bounds
 matching results. Results remain oldest first. Increase the scan limit or use `--before` for older
 history; no matches within the scan does not prove that the entire chat has no matching file.
-`--scan-limit` requires `--filename`, which also combines with `--search`, `--media`, and `--before`.
+`--scan-limit` applies to filename search and local media filters such as `sticker`, `poll`,
+`location`, `service` and `link_preview`. These filters scan up to 1000 messages by default.
+See `tcli help read` for the full list. A local filter also combines with `--filename`, `--search`
+and `--before`. Batch downloads offer only filters that can yield downloadable files.
 
 `--around ID` returns the selected message and up to `--context N` messages on each side
 (default: 5). It uses chat history order, not consecutive IDs. At history boundaries fewer messages
@@ -511,8 +536,8 @@ may be available. Missing target messages produce `message_not_found`. `--around
 `--id`, `--before`, and search/media/filename filters. `--context` requires `--around`;
 `--limit` applies only to history and filename search.
 
-`forward FROM_CHAT ID TO_CHAT` forwards one message, including its attachment and caption,
-through Telegram without downloading or uploading files. Both selectors use the normal chat rules.
+`forward FROM_CHAT ID [ID ...] TO_CHAT` forwards messages through Telegram.
+Pass `--album` and one member ID to forward its album as a group. Both selectors use the normal chat rules.
 The result has the same JSON shape as `send`. Forward attribution is retained; Telegram may reject
 protected content or destinations where you cannot post. Forward only on explicit user instruction;
 a development/test request does not authorize a live forward. Inspect history before retrying an
@@ -564,15 +589,65 @@ tcli send me '<blockquote>Quote</blockquote>' --format html
 tcli send me --file message.html --format html --reply-to 12345
 ```
 
-`--format plain` (the default) sends markup literally. Markdown is Telethon's dialect,
-not Telegram Bot API MarkdownV2: `**bold**`, `__italic__`, `~~strike~~`, backticks for code,
-triple backticks for code blocks, and `[label](URL)`. Use HTML for underline and nested
-formatting. Supported HTML includes `<b>`, `<strong>`, `<i>`, `<em>`, `<u>`, `<s>`, `<del>`,
-`<code>`, `<pre>`, `<a href="URL">`, and `<blockquote>` (also `expandable`).
-`<pre><code class="language-python">...</code></pre>` specifies a code-block language.
-HTML escapes use `&lt;`, `&gt;`, and `&amp;`. Use actual line breaks, not `<br>`.
-The installed Telethon parser does not support spoiler markup; unknown HTML tags are ignored.
-Telegram may trim surrounding whitespace when parsing formatted text.
+`plain` sends literal text. `markdown` retains Telethon's `**bold**`, `__italic__`, `~~strike~~`,
+code and links. `markdownv2` uses Telegram's MarkdownV2 rules for escaping, nested styles,
+underline, spoilers, quotes, custom emoji, formatted dates and code-block languages.
+`html` supports nested styles, links, code, expandable blockquotes, `<br>`, `<tg-spoiler>`,
+`<tg-emoji emoji-id="…">` and `<tg-time unix="…" format="…">`. Use
+`<pre><code class="language-python">…</code></pre>` for a code-block language.
+Parsing formatted text may trim surrounding whitespace.
+
+`--entities PATH` accepts a JSON array of Telegram entities with offsets and lengths in UTF-16
+code units. Omit `--format` with this option. For attachments, pass an array per caption in
+attachment order. For example, `[{"_":"MessageEntityBold","offset":0,"length":5}]`
+makes the first five UTF-16 code units bold. `export --format jsonl` saves these entities
+and structured media and service data. `watch --service` includes live service messages on bots.
+
+### Structured messages
+
+`--media-json PATH` accepts Telegram MTProto `InputMedia` objects. Use it for polls, quizzes,
+contacts, locations, venues, dice, games, invoices, to-do lists, story references and other
+constructors in the bundled Telethon schema. For example, save `{"_":"InputMediaDice","emoticon":"🎲"}`
+as `dice.json`.
+
+For a poll, save the following as `poll.json`. To make it a quiz, add `"quiz": true`
+inside `poll` and `"correct_answers": [0]` next to `poll`. Correct-answer indexes start at zero.
+
+```json
+{
+  "_": "InputMediaPoll",
+  "poll": {
+    "_": "Poll",
+    "id": 0,
+    "hash": 0,
+    "question": {"_": "TextWithEntities", "text": "Ready?", "entities": []},
+    "answers": [
+      {"_": "InputPollAnswer", "text": {"_": "TextWithEntities", "text": "Yes", "entities": []}},
+      {"_": "InputPollAnswer", "text": {"_": "TextWithEntities", "text": "No", "entities": []}}
+    ]
+  }
+}
+```
+
+```console
+tcli send me --media-json dice.json
+tcli send me --media-json poll.json
+tcli --session assistant send @channel "Open the link" --buttons-json buttons.json
+tcli send me --rich-json content.json
+tcli send me "Preview" --preview-url https://example.com --link-preview large --preview-above
+tcli export me --output history.jsonl --format jsonl
+```
+
+Use the Telegram constructor name in `_`, schema field names as keys, base64 for byte fields
+and ISO 8601 timestamps with an offset for dates. `--buttons-json` uses `ReplyMarkup`
+constructors and requires a bot session. `--rich-json` accepts `InputRichMessage`,
+`InputRichMessageHTML` and `InputRichMessageMarkdown` for Telegram's rich messages. For example,
+`{"_":"InputRichMessageHTML","html":"<h1>Title</h1>"}`. Telegram determines availability
+for each account, chat and referenced object. See the [MTProto schema](https://core.telegram.org/schema).
+
+`--link-preview off` disables previews, `auto` uses Telegram's default, and `above` places
+the preview above text. Use `large` or `small` with `--preview-url` to choose a size.
+`--preview-above` combines above-text placement with a size.
 
 PowerShell pipeline example (ensure the shell sends UTF-8):
 

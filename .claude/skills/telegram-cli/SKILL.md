@@ -33,7 +33,9 @@ If unavailable, inspect `tcli help`; do not assume newer commands exist based on
 | Stream history for a script | `tcli read "Chat" --after 123 --limit 1000 --jsonl` |
 | Observe future messages and edits | `tcli watch "Chat" --edits --json` |
 | Send literal text | `tcli send me "Text" --json` |
-| Edit outgoing text or an attachment caption | `tcli edit me 123 "Corrected text" --json` |
+| Edit outgoing text, caption or attachment | `tcli edit me 123 "Corrected text" --json` |
+| Clear an attachment caption | `tcli edit me 123 --clear-caption --json` |
+| Send a structured message from a JSON fixture | `tcli send me --media-json poll.json --json` |
 | Delete specific messages for everyone | `tcli delete me 123 124 --json` |
 | List local session files offline | `tcli sessions --json` |
 | Sign in to a named user session | `tcli --session work login` |
@@ -70,9 +72,9 @@ Bots use MTProto, not HTTP Bot API. Bot capabilities in this CLI:
 
 - Send text/files/albums, forward, edit outgoing messages and delete specified IDs within Telegram permissions.
 - Read known IDs (`read --id`), follow `thread`, single download/resume and info, subject to access.
-- Watch live new/edit events only; no history polling or replay guarantee. Privacy mode affects group events.
+- Watch live new/edit events and opt into service messages with `--service`. Privacy mode affects group events.
 - No chats list, title selection, Saved Messages (`me`), history/search/export, pinned/topics/scheduled commands,
-  send --schedule, album/batch download. These modes fail with bot_unsupported.
+  send --schedule, forward --album, album/batch download. These modes fail with bot_unsupported.
 - Use a known numeric chat ID or @username. A raw ID without a cached entity/access hash may fail.
   Bots cannot initiate arbitrary private conversations; users must contact/add the bot first.
 
@@ -134,12 +136,12 @@ History filters also work with `export` and `download --batch`:
 | Filter | Meaning |
 | --- | --- |
 | `--search QUERY` | Telegram text search within the selected chat |
-| `--media TYPE` | `photo`, `video`, `document`, `audio`, `voice`, `video_note`, `gif`; audio means music |
+| `--media TYPE` | Server filters include `photo`, `video`, `document`, `audio`, `voice`, `video_note`, `gif`; local filters include `sticker`, `poll`, `service` and `link_preview` |
 | `--from-user SELECTOR` | Sender: `me`, `@username`, or a known numeric user ID |
 | `--after ID` / `--before ID` | Exclusive lower/upper message ID bounds; after must be smaller than before |
 | `--since TIME` / `--until TIME` | Inclusive start, exclusive end; since must be earlier than until |
 | `--filename PATTERN` | Local case-insensitive glob over original attachment names: `*`, `?`, `[abc]` |
-| `--scan-limit N` | With filename only: maximum messages inspected after server filters; default 1000 |
+| `--scan-limit N` | Maximum messages inspected for a filename or local media filter; default 1000 |
 | `--topic ID` | Forum topic from `topics`; see topic restrictions below |
 
 Dates mean midnight UTC; timestamps require an offset or `Z`. Interpret user dates in their requested
@@ -161,7 +163,7 @@ within the bounds. Continue with the last emitted ID as `--after`. It excludes `
 Without `--after`, scanning starts at the beginning; a date-only lower bound can require reading old pages.
 Check exit status before treating any stream as complete.
 
-When `scan_limit_reached` appears on stderr before enough matches are found, use `next_before` for descending
+Run `tcli help read` for the full set of local media filters. When `scan_limit_reached` appears on stderr before enough matches are found, use `next_before` for descending
 scans or `next_after` for JSONL, or deliberately increase the scan bound. Reusing only the last matching ID can
 re-scan a gap containing no matches. An explicit continuation ID is a bound, not a returned message match.
 
@@ -174,17 +176,18 @@ To continue, use the final row's `id`, `top_message`, `offset_date` together as
 If offset_date is null, its source message was unavailable; do not invent a timestamp.
 
 `read --topic ID` reads that topic's replies, excluding its starter. General (ID 1) is selected locally
-from forum history, including ordinary replies and excluding other topic starters. Topic reads reject
-`--search`, `--media`, `--from-user` because Telegram ignores them on reply requests; date, ID and filename
+from forum history, including ordinary replies and excluding other topic starters. Telegram ignores
+`--search`, server media filters and `--from-user` on reply requests. Date, ID, filename and local media
 filters work. `pinned` returns up to its limit of pinned messages, oldest first within the selected page.
 
 `thread CHAT ID --depth N` follows parents in the same chat, returning root-to-selected order; default
 maximum total length is 10. `thread_incomplete` on stderr reports `depth_limit`, `missing_parent`,
 `cross_chat_parent` or `cycle`. Do not present a truncated chain as a complete conversation.
 
-`export` writes a new UTF-8 Markdown file, oldest first, with dates, authors, quoted text, attachment metadata
-and available message links. It supports history filters and `--limit` (default 1000); it does not download
-attachments. The parent directory must exist and existing files are never replaced.
+`export` writes a new UTF-8 file, oldest first. The default Markdown includes dates, authors, text,
+attachment metadata and message links. Use `--format jsonl` for structured media, service actions and entities.
+The command supports history filters and `--limit` (default 1000). The parent directory must exist
+and existing files are never replaced.
 
 ```console
 tcli topics "Forum" --search "Plans" --limit 10 --json
@@ -195,34 +198,47 @@ tcli export "Chat" --since 2026-10-01 --until 2026-10-08 --output history.md --j
 
 ## Send, edit, forward and schedule
 
-`send` takes exactly one source: positional TEXT, `--stdin`, `--file PATH`, or `--attach PATH [PATH ...]`.
-`edit CHAT ID` accepts the same text sources, without attachments. Files/stdin use UTF-8 with optional BOM;
-nonblank text is required. `--file` sends text contents, while `--attach` uploads binary files unchanged.
+`send` takes one source: positional TEXT, `--stdin`, `--file PATH`, `--attach PATH [PATH ...]`,
+`--media-json PATH`, or `--rich-json PATH`. `edit CHAT ID` supports the same sources,
+with one local attachment, and also accepts `--clear-caption` for an existing attachment message.
+Files/stdin use UTF-8 with optional BOM. `--file` sends text, and `--attach` uploads a local file.
 Use a file or stdin for multiline text or shell-sensitive characters. PowerShell pipelines must emit UTF-8.
 
-`--format plain|markdown|html` defaults to literal plain text. Telethon Markdown uses `**bold**`,
-`__italic__`, `~~strike~~`, backticks/code fences and `[label](URL)`, not Bot API MarkdownV2.
-HTML supports b/strong, i/em, u, s/del, code, pre, a, blockquote and pre/code language classes;
-use actual newlines, not br. Unsupported tags are ignored; spoiler markup is unsupported. Formatting may
-trim outer whitespace. Prefer HTML for nested formatting. Preserve the user's chosen text and formatting.
+`--format plain|markdown|markdownv2|html` defaults to literal text. Telethon Markdown uses
+`**bold**`, `__italic__`, `~~strike~~`, code and links. MarkdownV2 follows Telegram escaping,
+nested styles, spoiler, quote, custom emoji and date syntax. HTML supports nested formatting,
+language classes, `<br>`, spoiler tags, `<blockquote expandable>`, `<tg-emoji>` and `<tg-time>`.
+`--entities PATH` takes Telegram entity objects with UTF-16 offsets on literal text. For attachments,
+it also accepts a separate array per caption. Preserve the user's chosen text and formatting.
 
 `--reply-to ID` is for send only, including attachments. Repeat `--caption` in attachment order; missing
 captions are empty and one caption belongs to the first file. `--caption ""` skips an attachment.
-Without `--album`, files are sent individually in order. `--album` groups 2-10 compatible attachments;
-`--as-file` forces documents. Caption, album and as-file options require attachments.
-Telegram enforces media combinations, size limits and permissions.
+Repeat `--caption-format` when captions use different formats. `--album` groups 2-10 compatible files.
+`--as-file` forces documents. `--attachment-type` accepts photo, video, audio, voice, video-note,
+animation, sticker and document. Sticker uploads require `--sticker-emoji`.
+`--media-spoiler`, `--ttl`, `--view-once`, `--thumbnail`, `--cover`, `--duration`,
+`--dimensions` and `--streaming` set Telegram media options. Use properly encoded files.
+Expiry requires compatible single media and chat. Telegram enforces media combinations and permissions.
 
-`edit` changes outgoing text or captions, not attachments; empty captions cannot be cleared.
-Verify the outgoing message in that chat. Telegram enforces edit time limits and may reject unchanged text.
-`forward FROM_CHAT ID TO_CHAT` uses native forwarding, preserving attribution and media without local
-re-upload. Protected-content and posting restrictions still apply.
+`--media-json` takes a Telegram `InputMedia` constructor for polls, quizzes, contacts, locations, dice,
+games, invoices, tasks, story references and other media. `--rich-json` takes an `InputRichMessage`
+constructor. `--buttons-json` takes bot `ReplyMarkup`. In these JSON files, use `_` for the constructor
+name, base64 for bytes and an ISO timestamp with timezone for dates. See the [MTProto schema](https://core.telegram.org/schema).
+`--link-preview off|auto|above|large|small` controls previews. Use `--preview-url` with size modes
+and `--preview-above` to combine placement and size.
+
+Verify outgoing messages before using `edit`. Telegram enforces edit time limits and media rules.
+`forward FROM_CHAT ID [ID ...] TO_CHAT` uses native forwarding with attribution. Use `--album`
+and one source ID to forward the grouped album. Protected-content and posting restrictions apply.
 
 ```console
 tcli send me --file message.html --format html --reply-to 123 --json
 tcli send me --stdin --json
 tcli send me --attach app.apk archive.zip --caption "App" --caption "Archive" --as-file --json
 tcli send me --attach first.jpg second.jpg --album --silent --json
+tcli send me --attach note.ogg --attachment-type voice --duration 5 --json
 tcli edit me 123 --file corrected.txt --json
+tcli edit me 123 --attach replacement.jpg --caption "New caption" --json
 tcli forward "Source" 123 me --json
 tcli send me "Reminder" --silent --schedule 2026-10-20T10:00:00+03:00 --json
 tcli scheduled me --json
@@ -291,9 +307,10 @@ Prefer JSON for automation; human output strips terminal controls, while JSON pr
 using escaping. Dates are ISO 8601 with offsets; human timestamps use the local timezone.
 Message fields: id, chat_id, date, sender_id, sender_name, out, text, has_media, media, reply_to_id, grouped_id.
 Sender ID/name and reply/album IDs can be null. Cached sender_name needs no per-message request.
-media is null without a downloadable photo/document; has_media may still be true for link previews.
+media is null without a downloadable photo/document; inspect `media_payload` for structured media.
 Media fields: type, name, mime_type, size, ext, width, height, duration; missing metadata is null.
-JSON contains resulting plain text, not formatting entities or the original Markdown/HTML source.
+Message objects also include entities, service, media_payload, reply_markup, reply_to, forward and
+rich_message when present. Entities preserve Telegram formatting and link targets.
 
 | Command with JSON output | Stdout shape |
 | --- | --- |

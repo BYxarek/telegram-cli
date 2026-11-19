@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
@@ -30,13 +31,29 @@ from qrcode import QRCode
 from telethon import TelegramClient, errors, events, helpers, utils
 from telethon.errors import FloodWaitError, RPCError
 from telethon.tl import custom, types, functions
+from telethon.tl.tlobject import TLObject
 from tcli_skills import __version__
+from tcli_messages import (attachment_media, entity_list, parse_mode, read_wire,
+                           validate_entities, wire_value)
 
 
 MEDIA_FILTERS = {"photo": types.InputMessagesFilterPhotos, "video": types.InputMessagesFilterVideo,
                  "document": types.InputMessagesFilterDocument, "audio": types.InputMessagesFilterMusic,
                  "voice": types.InputMessagesFilterVoice, "video_note": types.InputMessagesFilterRoundVideo,
                  "gif": types.InputMessagesFilterGif}
+MESSAGE_FORMATS = ("plain", "markdown", "markdownv2", "html")
+LOCAL_MEDIA_FILTERS = {
+    "sticker": None, "service": None, "text": None,
+    "poll": types.MessageMediaPoll, "contact": types.MessageMediaContact,
+    "location": types.MessageMediaGeo, "live_location": types.MessageMediaGeoLive,
+    "venue": types.MessageMediaVenue, "dice": types.MessageMediaDice, "game": types.MessageMediaGame,
+    "invoice": types.MessageMediaInvoice, "story": types.MessageMediaStory,
+    "giveaway": types.MessageMediaGiveaway, "giveaway_results": types.MessageMediaGiveawayResults,
+    "paid_media": types.MessageMediaPaidMedia, "todo": types.MessageMediaToDo,
+    "stream": types.MessageMediaVideoStream, "link_preview": types.MessageMediaWebPage,
+    "unsupported": types.MessageMediaUnsupported,
+}
+MEDIA_CHOICES = (*MEDIA_FILTERS, *LOCAL_MEDIA_FILTERS)
 
 
 class CommandError(ValueError):
@@ -212,7 +229,7 @@ Help works without configuration or a Telegram login.''')
     for name, help_text, example in (
             ("read", "Read recent messages, oldest first", 'tcli read "Chat name" --limit 10'),
             ("send", "Send text or a file with optional formatting", 'tcli send me --attach photo.jpg --caption "Hello!"'),
-            ("edit", "Edit an outgoing message or attachment caption", 'tcli edit me 123 "Corrected text"'),
+            ("edit", "Edit outgoing text, captions or media", 'tcli edit me 123 "Corrected text"'),
             ("delete", "Delete specific messages for everyone after checking their chat", 'tcli delete me 123 124'),
             ("download", "Download a message attachment to a new local file", 'tcli download me 123 --output photo.jpg'),
             ("forward", "Forward a message or attachment between chats", 'tcli forward "Source chat" 123 me --json'),
@@ -240,7 +257,7 @@ Help works without configuration or a Telegram login.''')
             page.add_argument("--before", type=positive_int, metavar="ID",
                                  help="read messages older than this message ID (exclusive)")
             command.add_argument("--search", metavar="QUERY", help="search message text using Telegram search")
-            command.add_argument("--media", choices=MEDIA_FILTERS, help="filter attachments using Telegram search")
+            command.add_argument("--media", choices=MEDIA_CHOICES, help="filter by attachment type")
             command.add_argument("--filename", metavar="PATTERN", help="case-insensitive filename glob, e.g. *.apk")
             command.add_argument("--scan-limit", type=positive_int, metavar="N",
                                  help="maximum messages to inspect with --filename (default: 1000)")
@@ -253,16 +270,46 @@ Help works without configuration or a Telegram login.''')
             source.add_argument("text", nargs="?", metavar="TEXT", help="literal message text in quotes")
             source.add_argument("--stdin", action="store_true", help="read UTF-8 text from stdin until EOF")
             source.add_argument("--file", type=Path, metavar="PATH", help="read text from a UTF-8 file")
+            source.add_argument("--media-json", type=Path, help="send or replace Telegram InputMedia from JSON")
+            source.add_argument("--rich-json", type=Path, help="send or edit Telegram InputRichMessage from JSON")
+            command.add_argument("--entities", type=Path, help="formatting entities JSON; UTF-16 offsets")
+            command.add_argument("--buttons-json", type=Path, help="Telegram ReplyMarkup JSON for bot sessions")
+            command.add_argument("--link-preview", choices=("auto", "off", "above", "large", "small"),
+                                 help="configure the link preview for text")
+            command.add_argument("--preview-url", help="URL for an explicit link preview")
+            command.add_argument("--preview-above", action="store_true", help="place a link preview above the text")
+            command.add_argument("--caption", action="append", help="caption per attachment in order; repeat as needed")
+            source.add_argument("--attach", type=Path, nargs="+" if name == "send" else None,
+                                metavar="PATH", help="upload a local attachment")
+            if name == "edit":
+                source.add_argument("--clear-caption", action="store_true", help="remove the caption from an attachment")
+            else:
+                command.add_argument("--caption-format", choices=MESSAGE_FORMATS, action="append",
+                                     help="format per attachment; repeat in attachment order")
+            command.add_argument("--as-file", action="store_true", help="send as documents; requires --attach")
+            command.add_argument("--attachment-type", choices=("photo", "video", "audio", "voice", "video-note",
+                                                                 "animation", "sticker", "document"),
+                                 help="explicit type for local attachments")
+            command.add_argument("--sticker-emoji", help="emoji associated with a local sticker")
+            command.add_argument("--duration", type=positive_int, help="attachment duration in seconds")
+            command.add_argument("--dimensions", nargs=2, metavar=("WIDTH", "HEIGHT"), type=positive_int,
+                                 help="video or sticker dimensions")
+            command.add_argument("--streaming", action="store_true", help="mark video as streamable")
+            command.add_argument("--thumbnail", type=Path, help="JPEG thumbnail for documents")
+            command.add_argument("--cover", type=Path, help="cover image for video")
+            command.add_argument("--media-spoiler", action="store_true", help="hide the attachment behind a spoiler")
+            expiry = command.add_mutually_exclusive_group()
+            expiry.add_argument("--ttl", type=positive_int, help="seconds until media expires after opening")
+            expiry.add_argument("--view-once", action="store_true", help="allow opening the media once")
+            command.set_defaults(wire_media=None, wire_rich=None, wire_buttons=None, wire_entities=None,
+                                 caption_format=None)
             if name == "send":
                 command.add_argument("--silent", action="store_true", help="send without a notification sound")
                 command.add_argument("--schedule", type=schedule_timestamp, help="future ISO timestamp with timezone; Telegram schedules delivery")
-                source.add_argument("--attach", type=Path, nargs="+", metavar="PATH", help="upload one or more local files in order")
-                command.add_argument("--caption", action="append", help="caption per attachment in order; repeat as needed")
-                command.add_argument("--as-file", action="store_true", help="send as documents; requires --attach")
                 command.add_argument("--album", action="store_true", help="group 2-10 compatible attachments as an album")
                 command.add_argument("--reply-to", type=positive_int, metavar="ID", help="reply to a message in this chat")
-            command.add_argument("--format", choices=("plain", "markdown", "html"), default="plain",
-                                 help="text formatting (default: plain); uses Telethon Markdown or HTML")
+            command.add_argument("--format", choices=MESSAGE_FORMATS, default="plain",
+                                 help="text or caption formatting (default: plain)")
         elif name == "download":
             command.add_argument("message_id", type=positive_int, nargs="?", metavar="ID", help="message ID; omit with --batch")
             command.add_argument("--batch", action="store_true", help="download attachments matching history filters")
@@ -270,7 +317,8 @@ Help works without configuration or a Telegram login.''')
             command.add_argument("--max-bytes", type=positive_int, help="required with --batch: maximum total attachment bytes")
             command.add_argument("--limit", type=positive_int, default=20, help="maximum batch attachments (default: 20)")
             command.add_argument("--search", help="Telegram text search for batch downloads")
-            command.add_argument("--media", choices=MEDIA_FILTERS, help="batch media filter")
+            command.add_argument("--media", choices=(*MEDIA_FILTERS, "sticker", "link_preview", "service"),
+                                 help="batch media filter")
             command.add_argument("--filename", help="batch filename glob, case-insensitive")
             command.add_argument("--scan-limit", type=positive_int, help="filename scan bound (default: 1000)")
             command.add_argument("--before", type=positive_int, help="batch messages older than ID")
@@ -283,15 +331,18 @@ Help works without configuration or a Telegram login.''')
         elif name == "delete":
             command.add_argument("message_ids", type=positive_int, nargs="+", metavar="ID", help="only these IDs in this chat; irreversible")
         elif name == "forward":
-            command.add_argument("message_id", type=positive_int, metavar="ID", help="message ID in the source chat")
+            command.add_argument("message_ids", type=positive_int, nargs="+", metavar="ID", help="message IDs in the source chat")
             command.add_argument("to_chat", metavar="TO_CHAT", help="destination chat selector")
+            command.add_argument("--album", action="store_true", help="forward the whole album containing one ID")
         elif name == "export":
             history_arguments(command)
-            command.add_argument("--output", type=Path, required=True, help="new Markdown file; never overwrite")
+            command.add_argument("--output", type=Path, required=True, help="new output file; never overwrite")
+            command.add_argument("--format", choices=("markdown", "jsonl"), default="markdown",
+                                 help="Markdown or lossless message metadata as JSONL")
             command.add_argument("--limit", type=positive_int, default=1000, help="maximum messages (default: 1000)")
             command.add_argument("--before", type=positive_int)
             command.add_argument("--search")
-            command.add_argument("--media", choices=MEDIA_FILTERS)
+            command.add_argument("--media", choices=MEDIA_CHOICES)
             command.add_argument("--filename")
             command.add_argument("--scan-limit", type=positive_int)
         elif name == "thread":
@@ -309,6 +360,7 @@ Help works without configuration or a Telegram login.''')
             command.add_argument("--cancel", type=positive_int, nargs="+", metavar="ID", help="cancel only these scheduled IDs in this chat")
         elif name == "watch":
             command.add_argument("--edits", action="store_true", help="detect edits via updates and polling the latest 100 messages; JSONL adds event=new|edit")
+            command.add_argument("--service", action="store_true", help="include live service messages in bot sessions")
         if name in ("send", "download"):
             command.add_argument("--progress", action=argparse.BooleanOptionalAction, default=None,
                                  help="transfer progress on stderr (default: on in a terminal); JSON events with --json")
@@ -480,7 +532,7 @@ def show_message(message):
     name = sender_name(message)
     if name and not message.out:
         sender = f"{safe_text(name).replace(chr(10), ' ').replace(chr(9), ' ')} ({sender})"
-    body = message.raw_text or "[media or service message]"
+    body = message.raw_text or f"[{message_kind(message)}]"
     media = media_data(message)
     if media is not None:
         details = [media["type"], media["name"], media["mime_type"]]
@@ -499,21 +551,47 @@ def media_data(message):
     file = getattr(message, "file", None)
     if file is None:
         return None
-    kind = next((name for name in ("photo", "voice", "video_note", "gif", "video", "audio", "sticker")
+    kind = next((name for name in ("sticker", "photo", "voice", "video_note", "gif", "video", "audio")
                  if getattr(message, name, None)), "document")
     return {"type": kind, "name": file.name, "mime_type": file.mime_type,
             "size": file.size, "ext": file.ext, "width": file.width,
             "height": file.height, "duration": file.duration}
 
 
+def message_kind(message):
+    for value in (getattr(message, "action", None), getattr(message, "media", None)):
+        if value is not None and not isinstance(value, types.MessageMediaEmpty):
+            return type(value).__name__
+    return "text"
+
+
+def media_matches_locally(message, kind):
+    if kind == "sticker":
+        return bool(getattr(message, "sticker", None))
+    if kind == "service":
+        return getattr(message, "action", None) is not None
+    if kind == "text":
+        return message_kind(message) == "text"
+    return isinstance(message.media, LOCAL_MEDIA_FILTERS[kind])
+
+
 def message_data(message):
-    return {"id": message.id, "chat_id": message.chat_id,
+    data = {"id": message.id, "chat_id": message.chat_id,
             "date": message.date.isoformat(), "sender_id": message.sender_id,
             "out": message.out, "text": message.raw_text or "",
             "has_media": bool(message.media), "media": media_data(message),
             "reply_to_id": getattr(message, "reply_to_msg_id", None),
             "grouped_id": getattr(message, "grouped_id", None),
             "sender_name": sender_name(message)}
+    for field, key in (("entities", "entities"), ("action", "service"), ("media", "media_payload"),
+                       ("reply_markup", "reply_markup"), ("reply_to", "reply_to"),
+                       ("fwd_from", "forward"), ("rich_message", "rich_message")):
+        value = getattr(message, field, None)
+        if isinstance(value, TLObject) or isinstance(value, list) and value:
+            data[key] = wire_value(value)
+    if getattr(message, "invert_media", None):
+        data["invert_media"] = True
+    return data
 
 
 def sender_name(message):
@@ -579,7 +657,7 @@ async def history_options(client, args):
             options[target] = value
     if args.topic == 1:
         options.pop("reply_to", None)
-    if args.media is not None:
+    if args.media in MEDIA_FILTERS:
         options["filter"] = MEDIA_FILTERS[args.media]()
     if args.from_user is not None:
         value = args.from_user
@@ -599,7 +677,7 @@ def scan_notice(args, scanned, matched, last_id=None, *, ascending=False):
     direction = "after" if ascending else "before"
     data = {"event": "scan_limit_reached", "scanned": scanned, "scan_limit": limit,
             f"next_{direction}": last_id,
-            "message": f"Filename search is incomplete: scan limit reached. Continue with --{direction} {last_id} or increase --scan-limit."}
+            "message": f"Search is incomplete: scan limit reached. Continue with --{direction} {last_id} or increase --scan-limit."}
     if args.json:
         print(json.dumps(data), file=sys.stderr)
     else:
@@ -615,7 +693,8 @@ async def iter_history(client, chat, args, *, ascending=False):
             options["max_id"] = options.pop("offset_id")
     scanned = matched = 0
     last_id = None
-    scan_limit = (args.scan_limit or 1000) if args.filename else None
+    local_filter = args.media in LOCAL_MEDIA_FILTERS
+    scan_limit = (args.scan_limit or 1000) if args.filename or local_filter else None
     iterator = client.iter_messages(chat, limit=None, reverse=ascending, **options)
     async for message in iterator:
         if args.since is not None and message.date < args.since:
@@ -629,6 +708,8 @@ async def iter_history(client, chat, args, *, ascending=False):
         scanned += 1
         last_id = message.id
         matches = not args.filename or filename_matches(message, args.filename)
+        if local_filter:
+            matches = matches and media_matches_locally(message, args.media)
         if args.topic == 1:
             header = getattr(message, "reply_to", None)
             if getattr(header, "forum_topic", False):
@@ -645,7 +726,7 @@ async def iter_history(client, chat, args, *, ascending=False):
                 break
         if scan_limit is not None and scanned >= scan_limit:
             break
-    if args.filename:
+    if scan_limit is not None:
         scan_notice(args, scanned, matched, last_id, ascending=ascending)
 
 
@@ -723,9 +804,216 @@ def markdown_message(message):
     text = safe_text(message.raw_text or "")
     if media:
         text += f"\n[Attachment: {media['type']}; name={media['name']}; bytes={media['size']}]"
+    elif message_kind(message) != "text":
+        text += f"\n[{message_kind(message)}]"
+    entities = getattr(message, "entities", None)
+    if entities:
+        text += "\n[Telegram entities: " + json.dumps(wire_value(entities), ensure_ascii=True) + "]"
     # Quote untrusted message bodies so embedded Markdown cannot inject document sections.
     body = "\n".join("> " + line for line in text.splitlines())
     return f"## {safe_text(heading)}\n\n" + (f"[Open message]({link})\n\n" if link else "") + body + "\n\n"
+
+
+def attachment_options(args):
+    return any((args.attachment_type, args.sticker_emoji, args.duration, args.dimensions, args.streaming,
+                args.thumbnail, args.cover, args.media_spoiler, args.ttl, args.view_once))
+
+
+def prepare_message_options(args):
+    def read_json(path):
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+
+    for field, path, schema in (("wire_media", args.media_json, types.TypeInputMedia),
+                                ("wire_rich", args.rich_json, types.TypeInputRichMessage),
+                                ("wire_buttons", args.buttons_json, types.TypeReplyMarkup)):
+        if path is not None:
+            value = read_wire(read_json(path), schema)
+            try:
+                bytes(value)
+            except (AssertionError, OverflowError, struct.error) as error:
+                raise ValueError(f"Invalid Telegram object in {path.name}: {error}") from error
+            setattr(args, field, value)
+    paths = args.attach if isinstance(args.attach, list) else [args.attach] if args.attach else []
+    for path in (*paths, args.thumbnail, args.cover):
+        if path is not None and not path.is_file():
+            raise ValueError("Every attachment, thumbnail and cover must be an existing local file.")
+    count = len(paths) or int(args.media_json is not None)
+    if not count and (args.caption or args.caption_format):
+        raise ValueError("--caption and --caption-format require media or attachments.")
+    if len(args.caption or []) > count or len(args.caption_format or []) > count:
+        raise ValueError("Provide at most one --caption and --caption-format per attachment.")
+    if not paths and (attachment_options(args) or args.as_file or getattr(args, "album", False)):
+        raise ValueError("Local attachment options require --attach.")
+    if args.as_file and args.attachment_type not in (None, "document"):
+        raise ValueError("--as-file can only be combined with attachment type document.")
+    if bool(args.sticker_emoji) != (args.attachment_type == "sticker"):
+        raise ValueError("A local sticker requires --sticker-emoji, which applies only to stickers.")
+    if args.cover and (args.as_file or args.attachment_type not in (None, "video", "video-note", "animation")):
+        raise ValueError("--cover requires a video attachment.")
+    if args.thumbnail and (args.attachment_type == "photo" or
+                           args.attachment_type is None and not args.as_file and
+                           any(utils.is_image(str(path)) for path in paths)):
+        raise ValueError("--thumbnail is available for document-based attachments.")
+    if args.duration and args.attachment_type not in ("voice", "audio", "video", "video-note", "animation"):
+        raise ValueError("--duration requires an explicit audio, voice, video, video-note or animation type.")
+    if args.dimensions and args.attachment_type not in ("video", "video-note", "animation", "sticker"):
+        raise ValueError("--dimensions requires an explicit video, video-note, animation or sticker type.")
+    if any(value >= 2 ** 31 for value in (args.duration or 0, *(args.dimensions or ()))):
+        raise ValueError("Duration and dimensions must fit in a Telegram 32-bit integer.")
+    if (args.streaming or args.cover or args.attachment_type in ("video", "video-note")) and any(
+            not utils.is_video(str(path)) for path in paths):
+        raise ValueError("Video options require a video file.")
+    if args.attachment_type in ("voice", "audio") and any(not utils.is_audio(str(path)) for path in paths):
+        raise ValueError("Audio and voice attachments require an audio file.")
+    if args.ttl and args.ttl >= 0x7fffffff:
+        raise ValueError("--ttl must be smaller than 2147483647; use --view-once for a single view.")
+    if args.view_once:
+        args.ttl = 0x7fffffff
+    if getattr(args, "album", False):
+        if not 2 <= count <= 10:
+            raise ValueError("An album requires 2-10 compatible attachments.")
+        if args.ttl or args.wire_buttons or args.attachment_type in ("sticker", "voice", "video-note", "animation"):
+            raise ValueError("Albums cannot use expiring media, keyboards, voice notes, video notes, animations or stickers.")
+    if args.link_preview is not None or args.preview_url is not None or args.preview_above:
+        if count or args.rich_json or getattr(args, "clear_caption", False):
+            raise ValueError("Link preview options require a text message.")
+        if args.preview_url is None and args.link_preview in ("large", "small"):
+            raise ValueError("--link-preview large or small requires --preview-url.")
+        if args.preview_above and args.link_preview == "off":
+            raise ValueError("--preview-above requires an enabled link preview.")
+        if args.preview_url is not None:
+            url = urlsplit(args.preview_url)
+            if args.link_preview == "off" or url.scheme not in ("http", "https") or not url.hostname:
+                raise ValueError("--preview-url requires an enabled HTTP(S) preview.")
+
+    if getattr(args, "clear_caption", False):
+        args.text = ""
+    if args.entities is None:
+        values = (args.caption or []) + [""] * count if count else [args.text or ""]
+        modes = (args.caption_format or []) + [args.format] * len(values)
+        for mode, value in zip(modes, values):
+            parser_for_text = parse_mode(mode, value)
+            if callable(parser_for_text):
+                parsed, entities = parser_for_text(value)
+                validate_entities(parsed, [entity for entity in entities if entity.length])
+    if args.entities is not None:
+        if args.format != "plain" or args.caption_format or args.rich_json:
+            raise ValueError("--entities uses plain text and cannot be combined with caption formats or rich messages.")
+        value = read_json(args.entities)
+        if count:
+            groups = value if isinstance(value, list) and value and isinstance(value[0], list) else [value]
+            if len(groups) > count:
+                raise ValueError("Provide at most one entity array per attachment caption.")
+            args.wire_entities = [entity_list(group) for group in groups]
+            captions = (args.caption or []) + [""] * count
+            for caption, entities in zip(captions, args.wire_entities):
+                validate_entities(caption, entities)
+            args.wire_entities += [[] for _ in range(count - len(groups))]
+        else:
+            args.wire_entities = entity_list(value)
+            validate_entities(args.text, args.wire_entities)
+
+
+async def format_message(client, text, mode, entities=None):
+    if entities is None:
+        return await client._parse_message_text(text, parse_mode(mode, text))
+    return text, entities
+
+
+async def send_wire_message(client, chat, args):
+    peer = await client.get_input_entity(chat)
+    caption = (args.caption or [""])[0]
+    source = caption if args.wire_media is not None else args.text or ""
+    mode = (args.caption_format or [args.format])[0]
+    entities = args.wire_entities
+    if entities is not None and args.wire_media is not None:
+        entities = entities[0]
+    text, entities = await format_message(client, source, mode, entities)
+    options = dict(peer=peer, message=text, entities=entities, silent=args.silent,
+                   schedule_date=args.schedule, reply_markup=args.wire_buttons,
+                   reply_to=types.InputReplyToMessage(args.reply_to) if args.reply_to else None,
+                   invert_media=(args.preview_above or args.link_preview == "above") or None)
+    media = args.wire_media
+    if args.preview_url is not None:
+        media = types.InputMediaWebPage(args.preview_url, force_large_media=args.link_preview == "large" or None,
+                                       force_small_media=args.link_preview == "small" or None)
+    if media is None:
+        request = functions.messages.SendMessageRequest(
+            **options, no_webpage=args.link_preview == "off" or None, rich_message=args.wire_rich)
+    else:
+        request = functions.messages.SendMediaRequest(**options, media=media)
+    result = await client(request)
+    if isinstance(result, types.UpdateShortSentMessage):
+        return types.Message(id=result.id, peer_id=await client._get_peer(peer), date=result.date,
+                             out=result.out, message=text, media=result.media, entities=result.entities or entities,
+                             reply_markup=args.wire_buttons, ttl_period=result.ttl_period,
+                             invert_media=options["invert_media"],
+                             reply_to=types.MessageReplyHeader(reply_to_msg_id=args.reply_to) if args.reply_to else None)
+    message = client._get_response_message(request, result, peer)
+    if message is None:
+        raise CommandError("send_failed", "Telegram did not return the sent message.")
+    return message
+
+
+async def send_prepared_album(client, chat, args, streams, captions, formats, progress):
+    peer = await client.get_input_entity(chat)
+    album = []
+    for index, (stream, caption, mode) in enumerate(zip(streams, captions, formats)):
+        entities = args.wire_entities[index] if args.wire_entities is not None else None
+        text, entities = await format_message(client, caption, mode, entities)
+        callback = None
+        if progress is not None:
+            def callback(done, total, index=index):
+                progress(index + done / total if total else index + 1, len(streams))
+        uploaded = await attachment_media(client, peer, stream, args, callback)
+        result = await client(functions.messages.UploadMediaRequest(peer, uploaded))
+        if isinstance(uploaded, types.InputMediaUploadedPhoto):
+            media = types.InputMediaPhoto(utils.get_input_photo(result.photo), spoiler=uploaded.spoiler)
+        else:
+            media = types.InputMediaDocument(utils.get_input_document(result.document), spoiler=uploaded.spoiler,
+                                             video_cover=uploaded.video_cover, video_timestamp=uploaded.video_timestamp)
+        album.append(types.InputSingleMedia(media, message=text, entities=entities))
+    request = functions.messages.SendMultiMediaRequest(
+        peer, album, silent=args.silent, schedule_date=args.schedule,
+        reply_to=types.InputReplyToMessage(args.reply_to) if args.reply_to else None)
+    return client._get_response_message([item.random_id for item in album], await client(request), peer)
+
+
+async def edit_outgoing(client, chat, args, original):
+    if args.clear_caption and getattr(original, "file", None) is None:
+        raise ValueError("--clear-caption requires an attachment message.")
+    if args.attach is None and args.wire_media is None and args.wire_rich is None and not (
+            args.preview_url or args.preview_above or args.link_preview == "above" or args.wire_buttons is not None):
+        options = {}
+        if args.wire_entities is not None:
+            options["formatting_entities"] = args.wire_entities
+        if args.link_preview is not None:
+            options["link_preview"] = args.link_preview != "off"
+        text = "" if args.clear_caption else args.text
+        return await client.edit_message(chat, args.message_id, text,
+                                         parse_mode=parse_mode(args.format, text), **options)
+    peer = await client.get_input_entity(chat)
+    media = args.wire_media
+    if args.attach is not None:
+        with args.attach.open("rb") as stream:
+            media = await attachment_media(client, peer, stream, args)
+    if args.preview_url is not None:
+        media = types.InputMediaWebPage(args.preview_url, force_large_media=args.link_preview == "large" or None,
+                                       force_small_media=args.link_preview == "small" or None)
+    text, entities = None, None
+    if args.caption is not None:
+        explicit = args.wire_entities[0] if args.wire_entities is not None else None
+        text, entities = await format_message(client, args.caption[0], args.format, explicit)
+    elif args.text is not None:
+        text, entities = await format_message(client, args.text, args.format, args.wire_entities)
+    request = functions.messages.EditMessageRequest(
+        peer, args.message_id, message=text, media=media, entities=entities, rich_message=args.wire_rich,
+        reply_markup=args.wire_buttons, invert_media=(args.preview_above or args.link_preview == "above") or None,
+        no_webpage=args.link_preview == "off" or None)
+    message = client._get_response_message(request, await client(request), peer)
+    if message is not None and message.date is None:
+        return await client.get_messages(peer, ids=args.message_id)
+    return message
 
 
 def report_error(json_mode, code, message, *, retry_after=None, args=None, **details):
@@ -1020,8 +1308,11 @@ async def run(client, args):
         if bot and (args.command in ("chats", "export", "pinned", "topics", "scheduled") or
                     (args.command == "read" and args.id is None) or
                     (args.command == "download" and (args.batch or args.album)) or
-                    (args.command == "send" and args.schedule is not None)):
+                    (args.command == "send" and args.schedule is not None) or
+                    (args.command == "forward" and args.album)):
             raise CommandError("bot_unsupported", "This command/mode requires a user session. Bots support read --id, single downloads and live watch; see README.")
+        if not bot and getattr(args, "wire_buttons", None) is not None:
+            raise CommandError("bot_required", "--buttons-json requires a bot session.")
         if args.command == "doctor":
             print("Telegram connection: OK\nSession authorization: OK")
             print(f"Account type: {'bot' if bot else 'user'}")
@@ -1066,14 +1357,14 @@ async def run(client, args):
                         older = await client.get_messages(chat, limit=context, offset_id=message.id)
                         newer = await client.get_messages(chat, limit=context, min_id=message.id, reverse=True)
                         messages = sorted([*older, message, *newer], key=lambda item: item.id, reverse=True)
-                elif args.filename is not None:
+                elif args.filename is not None and args.media not in LOCAL_MEDIA_FILTERS:
                     if args.since is not None or args.until is not None or args.from_user is not None or args.after is not None or args.topic is not None:
                         messages = [message async for message in iter_history(client, chat, args)]
                     else:
                         scanned = await client.get_messages(chat, limit=args.scan_limit or 1000, **options)
                         messages = [message for message in scanned if filename_matches(message, args.filename)][:args.limit]
                         scan_notice(args, len(scanned), len(messages), scanned[-1].id if scanned else None)
-                elif args.since is not None or args.until is not None or args.topic == 1:
+                elif args.since is not None or args.until is not None or args.topic == 1 or args.media in LOCAL_MEDIA_FILTERS:
                     messages = [message async for message in iter_history(client, chat, args)]
                 else:
                     messages = await client.get_messages(chat, limit=args.limit, **options)
@@ -1083,7 +1374,7 @@ async def run(client, args):
                     for message in reversed(messages):
                         show_message(message)
             elif args.command == "send":
-                if args.attach is None and not args.text.strip():
+                if args.attach is None and args.wire_media is None and args.wire_rich is None and not (args.text or "").strip():
                     raise ValueError("Message text must not be empty.")
                 options = {}
                 if args.silent:
@@ -1092,35 +1383,62 @@ async def run(client, args):
                     options["schedule"] = args.schedule
                 if args.reply_to is not None:
                     options["reply_to"] = args.reply_to
-                mode = None if args.format == "plain" else args.format
                 args.sent_messages = []
                 if args.attach is not None:
                     captions = (args.caption or []) + [""] * (len(args.attach) - len(args.caption or []))
+                    formats = (args.caption_format or []) + [args.format] * (len(args.attach) - len(args.caption_format or []))
+                    prepared = attachment_options(args)
                     if args.album:
                         progress = transfer_progress(args, "upload", "album", [path.stat().st_size for path in args.attach])
-                        if progress is not None:
-                            options["progress_callback"] = progress
                         with ExitStack() as stack:
                             streams = [stack.enter_context(path.open("rb")) for path in args.attach]
-                            messages = await client.send_file(chat, streams, caption=captions,
-                                                              force_document=args.as_file, parse_mode=mode, **options)
-                        args.sent_messages.extend(messages)
+                            if prepared or args.caption_format:
+                                messages = await send_prepared_album(client, chat, args, streams, captions, formats, progress)
+                            else:
+                                if args.wire_entities is not None:
+                                    options["formatting_entities"] = args.wire_entities
+                                if progress is not None:
+                                    options["progress_callback"] = progress
+                                messages = await client.send_file(
+                                    chat, streams, caption=captions, force_document=args.as_file,
+                                    parse_mode=parse_mode(args.format, "\n".join(captions)), **options)
+                        args.sent_messages.extend(message for message in messages or [] if message is not None)
+                        if len(args.sent_messages) != len(args.attach):
+                            raise CommandError("send_failed", "Telegram did not return every album item.")
                         if not args.json:
-                            for message in messages:
+                            for message in args.sent_messages:
                                 print(f"Message {'scheduled' if args.schedule else 'sent'}. ID: {message.id}")
                     else:
-                        for path, caption in zip(args.attach, captions):
+                        if args.wire_buttons is not None:
+                            options["buttons"] = args.wire_buttons
+                        peer = await client.get_input_entity(chat) if prepared else None
+                        for index, (path, caption, mode) in enumerate(zip(args.attach, captions, formats)):
                             progress = transfer_progress(args, "upload", path)
-                            if progress is not None:
-                                options["progress_callback"] = progress
+                            item_options = options.copy()
+                            if args.wire_entities is not None:
+                                item_options["formatting_entities"] = args.wire_entities[index]
                             with path.open("rb") as stream:
-                                message = await client.send_file(chat, stream, caption=caption,
-                                                                 force_document=args.as_file, parse_mode=mode, **options)
+                                if not prepared and progress is not None:
+                                    item_options["progress_callback"] = progress
+                                file = await attachment_media(client, peer, stream, args, progress) if prepared else stream
+                                message = await client.send_file(
+                                    chat, file, caption=caption, force_document=args.as_file,
+                                    parse_mode=parse_mode(mode, caption), **item_options)
+                            if message is None:
+                                raise CommandError("send_failed", "Telegram did not return the sent attachment.")
                             args.sent_messages.append(message)
                             if not args.json:
                                 print(f"Message {'scheduled' if args.schedule else 'sent'}. ID: {message.id}")
                 else:
-                    message = await client.send_message(chat, args.text, parse_mode=mode, **options)
+                    if (args.wire_media is not None or args.wire_rich is not None or args.wire_buttons is not None
+                            or args.preview_url is not None or args.preview_above or args.link_preview == "above"):
+                        message = await send_wire_message(client, chat, args)
+                    else:
+                        if args.wire_entities is not None:
+                            options["formatting_entities"] = args.wire_entities
+                        if args.link_preview is not None:
+                            options["link_preview"] = args.link_preview != "off"
+                        message = await client.send_message(chat, args.text, parse_mode=parse_mode(args.format, args.text), **options)
                     args.sent_messages.append(message)
                     if not args.json:
                         print(f"Message {'scheduled' if args.schedule else 'sent'}. ID: {message.id}")
@@ -1129,14 +1447,24 @@ async def run(client, args):
             elif args.command == "forward":
                 destination = await resolve_chat(client, args.to_chat, bot=bot)
                 args.sent_messages = []
-                message = await client.forward_messages(destination, args.message_id, from_peer=chat)
-                if message is None:
-                    raise CommandError("message_not_found", "Message not found or cannot be forwarded.")
-                args.sent_messages.append(message)
-                if args.json:
-                    print(json.dumps({"ok": True, "messages": [message_data(message)]}))
+                ids = args.message_ids
+                if args.album:
+                    selected = await client.get_messages(chat, ids=ids[0])
+                    if selected is None:
+                        raise CommandError("message_not_found", "Message not found in the source chat.")
+                    ids = [item.id for item in await album_messages(client, chat, selected)]
+                if len(ids) == 1:
+                    messages = [await client.forward_messages(destination, ids[0], from_peer=chat)]
                 else:
-                    print(f"Message forwarded. ID: {message.id}")
+                    messages = await client.forward_messages(destination, ids, from_peer=chat)
+                args.sent_messages.extend(message for message in messages or [] if message is not None)
+                if len(args.sent_messages) != len(ids):
+                    raise CommandError("message_not_found", "One or more messages could not be forwarded.")
+                if args.json:
+                    print(json.dumps({"ok": True, "messages": [message_data(message) for message in args.sent_messages]}))
+                else:
+                    for message in args.sent_messages:
+                        print(f"Message forwarded. ID: {message.id}")
             elif args.command == "delete":
                 ids = list(dict.fromkeys(args.message_ids))
                 messages = await client.get_messages(chat, ids=ids)
@@ -1155,8 +1483,7 @@ async def run(client, args):
                     raise CommandError("message_not_found", "Message not found in this chat.")
                 if not original.out:
                     raise CommandError("not_outgoing", "Only outgoing messages can be edited.")
-                mode = None if args.format == "plain" else args.format
-                message = await client.edit_message(chat, args.message_id, args.text, parse_mode=mode)
+                message = await edit_outgoing(client, chat, args, original)
                 if message is None:
                     raise CommandError("edit_failed", "Telegram did not return the edited message.")
                 if args.json:
@@ -1256,9 +1583,11 @@ async def run(client, args):
                 messages = [message async for message in iter_history(client, chat, args)]
                 with args.output.open("x", encoding="utf-8") as stream:
                     try:
-                        stream.write("# Telegram history\n\n")
+                        if args.format == "markdown":
+                            stream.write("# Telegram history\n\n")
                         for message in reversed(messages):
-                            stream.write(markdown_message(message))
+                            stream.write(markdown_message(message) if args.format == "markdown" else
+                                         json.dumps(message_data(message), ensure_ascii=False) + "\n")
                     except BaseException:
                         stream.close()
                         args.output.unlink(missing_ok=True)
@@ -1269,18 +1598,32 @@ async def run(client, args):
                     print(f"Exported {len(messages)} messages: {safe_text(args.output.resolve())}")
             elif args.command == "watch":
                 if bot:
-                    async def live(event):
+                    def emit(message, event_type):
                         if args.json:
-                            data = message_data(event.message)
+                            data = message_data(message)
                             if args.edits:
-                                data["event"] = "edit" if isinstance(event, events.MessageEdited.Event) else "new"
+                                data["event"] = event_type
                             print(json.dumps(data), flush=True)
                         else:
-                            show_message(event.message)
+                            show_message(message)
                         client.session.save()
+
+                    async def live(event):
+                        emit(event.message, "edit" if isinstance(event, events.MessageEdited.Event) else "new")
+
                     builders = [events.NewMessage(chats=chat)]
                     if args.edits:
                         builders.append(events.MessageEdited(chats=chat))
+                    service = None
+                    if args.service:
+                        chat_id = await client.get_peer_id(chat)
+
+                        async def service_update(update):
+                            if isinstance(update.message, types.MessageService) and update.message.chat_id == chat_id:
+                                emit(update.message, "new")
+
+                        service = events.Raw(types=(types.UpdateNewMessage, types.UpdateNewChannelMessage))
+                        client.add_event_handler(service_update, service)
                     for builder in builders:
                         client.add_event_handler(live, builder)
                     try:
@@ -1289,6 +1632,8 @@ async def run(client, args):
                     finally:
                         for builder in builders:
                             client.remove_event_handler(live, builder)
+                        if service is not None:
+                            client.remove_event_handler(service_update, service)
                     return
                 def revision(message):
                     media = getattr(message, "document", None) or getattr(message, "photo", None)
@@ -1412,10 +1757,10 @@ def main():
                 raise ValueError("--since must be earlier than --until.")
             if args.after is not None and args.before is not None and args.after >= args.before:
                 raise ValueError("--after must be smaller than --before.")
-            if args.topic is not None and any(value is not None for value in (args.search, args.media, args.from_user)):
-                raise ValueError("--topic cannot combine with --search, --media or --from-user (Telegram ignores these filters for replies).")
-            if args.scan_limit is not None and args.filename is None:
-                raise ValueError("--scan-limit requires --filename.")
+            if args.topic is not None and (args.search is not None or args.media in MEDIA_FILTERS or args.from_user is not None):
+                raise ValueError("--topic cannot combine with --search, server media filters or --from-user.")
+            if args.scan_limit is not None and args.filename is None and args.media not in LOCAL_MEDIA_FILTERS:
+                raise ValueError("--scan-limit requires --filename or a local media filter.")
             if args.filename is not None and not args.filename.strip():
                 raise ValueError("Filename pattern must not be empty.")
         if args.command == "export":
@@ -1438,6 +1783,11 @@ def main():
                 raise ValueError("--context requires --around.")
         if args.command == "send" and args.attach is None and args.progress is not None:
             raise ValueError("--progress and --no-progress require --attach.")
+        if args.command == "forward":
+            if args.album and len(args.message_ids) != 1:
+                raise ValueError("--album requires exactly one source message ID.")
+            if len(set(args.message_ids)) != len(args.message_ids):
+                raise ValueError("Source message IDs must be unique.")
         if args.command == "download":
             if args.batch:
                 if args.message_id is not None or args.album or args.output_dir is None or args.max_bytes is None:
@@ -1456,25 +1806,16 @@ def main():
             if args.output is not None and os.path.lexists(args.output):
                 raise FileExistsError(f"Destination already exists: {args.output}")
         if args.command in ("send", "edit"):
-            if args.command == "send":
-                if args.schedule is not None and args.schedule <= datetime.now(timezone.utc):
-                    raise ValueError("--schedule must be a future timestamp with a timezone.")
-                if args.attach is None and (args.caption is not None or args.as_file or args.album):
-                    raise ValueError("--caption, --as-file and --album require --attach.")
-                if args.attach is not None:
-                    if any(not path.is_file() for path in args.attach):
-                        raise ValueError("Every attachment must be an existing local file.")
-                    if len(args.caption or []) > len(args.attach):
-                        raise ValueError("Provide at most one --caption per attachment.")
-                    if args.album and not 2 <= len(args.attach) <= 10:
-                        raise ValueError("An album requires 2-10 compatible attachments.")
+            if args.command == "send" and args.schedule is not None and args.schedule <= datetime.now(timezone.utc):
+                raise ValueError("--schedule must be a future timestamp with a timezone.")
             if args.stdin:
                 sys.stdin.reconfigure(encoding="utf-8-sig")
                 args.text = sys.stdin.read()
             elif args.file is not None:
                 args.text = args.file.read_text(encoding="utf-8-sig")
-            if (args.command == "edit" or args.attach is None) and not args.text.strip():
+            if args.text is not None and not args.text.strip():
                 raise ValueError("Message text must not be empty.")
+            prepare_message_options(args)
         if args.command == "doctor":
             print(f"Configuration path: {safe_text(config_path)}")
             print(f"Session path: {safe_text(session_dir / 'account.session')}")

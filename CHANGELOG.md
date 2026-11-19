@@ -7,6 +7,13 @@ move them into a versioned section when publishing a release.
 
 No unreleased changes.
 
+## 0.6.0 - 2026-11-19
+
+- Add MarkdownV2, expanded HTML formatting, explicit Telegram entities, per-caption formats and link preview controls.
+- Send typed local media, spoilers, expiring media and video covers. Replace media or clear a caption during edits.
+- Support structured media, rich messages and bot keyboards through validated Telegram JSON constructors.
+- Preserve structured media, service actions and entities in message JSON and JSONL exports. Add local media filters, bot service watch and multi-message or album forwarding.
+
 ## 0.5.0 - 2026-11-11
 
 - Show the delivery method chosen by Telegram during phone login.

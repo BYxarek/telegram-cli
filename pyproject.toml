@@ -33,7 +33,7 @@ Repository = "https://github.com/BYxarek/telegram-cli"
 Issues = "https://github.com/BYxarek/telegram-cli/issues"
 
 [tool.setuptools]
-py-modules = ["tg"]
+py-modules = ["tg", "tcli_messages"]
 packages = ["tcli_skills"]
 
 [tool.setuptools.package-data]
